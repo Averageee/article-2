@@ -1153,11 +1153,13 @@ CMakeFiles/client.dir/client.cpp.o: /home/average/secondcode/code/client.cpp \
   /usr/include/c++/14/span \
   /usr/include/c++/14/sstream \
   /usr/include/c++/14/stdexcept \
+  /usr/include/c++/14/stdlib.h \
   /usr/include/c++/14/stop_token \
   /usr/include/c++/14/streambuf \
   /usr/include/c++/14/string \
   /usr/include/c++/14/string_view \
   /usr/include/c++/14/system_error \
+  /usr/include/c++/14/thread \
   /usr/include/c++/14/tr1/bessel_function.tcc \
   /usr/include/c++/14/tr1/beta_function.tcc \
   /usr/include/c++/14/tr1/ell_integral.tcc \
@@ -1249,10 +1251,32 @@ CMakeFiles/client.dir/client.cpp.o: /home/average/secondcode/code/client.cpp \
   /usr/include/nlohmann/ordered_map.hpp \
   /usr/include/nlohmann/thirdparty/hedley/hedley.hpp \
   /usr/include/nlohmann/thirdparty/hedley/hedley_undef.hpp \
+  /usr/include/openssl/asn1.h \
+  /usr/include/openssl/asn1err.h \
+  /usr/include/openssl/bio.h \
+  /usr/include/openssl/bioerr.h \
+  /usr/include/openssl/bn.h \
+  /usr/include/openssl/bnerr.h \
+  /usr/include/openssl/core.h \
+  /usr/include/openssl/core_dispatch.h \
+  /usr/include/openssl/crypto.h \
+  /usr/include/openssl/cryptoerr.h \
+  /usr/include/openssl/cryptoerr_legacy.h \
   /usr/include/openssl/e_os2.h \
+  /usr/include/openssl/evp.h \
+  /usr/include/openssl/evperr.h \
+  /usr/include/openssl/indicator.h \
   /usr/include/openssl/macros.h \
+  /usr/include/openssl/obj_mac.h \
+  /usr/include/openssl/objects.h \
+  /usr/include/openssl/objectserr.h \
   /usr/include/openssl/opensslv.h \
+  /usr/include/openssl/params.h \
+  /usr/include/openssl/safestack.h \
   /usr/include/openssl/sha.h \
+  /usr/include/openssl/stack.h \
+  /usr/include/openssl/symhacks.h \
+  /usr/include/openssl/types.h \
   /usr/include/poll.h \
   /usr/include/pthread.h \
   /usr/include/rpc/netdb.h \
@@ -1546,8 +1570,6 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/x86_64-linux-gnu/bits/wordsize.h:
 
-/usr/include/x86_64-linux-gnu/bits/wchar.h:
-
 /usr/include/x86_64-linux-gnu/bits/waitstatus.h:
 
 /usr/include/x86_64-linux-gnu/bits/unistd_ext.h:
@@ -1652,8 +1674,6 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/x86_64-linux-gnu/bits/siginfo-consts.h:
 
-/usr/include/x86_64-linux-gnu/bits/sigcontext.h:
-
 /usr/include/x86_64-linux-gnu/bits/sigaction.h:
 
 /usr/include/x86_64-linux-gnu/bits/sched.h:
@@ -1734,13 +1754,47 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/poll.h:
 
+/usr/include/x86_64-linux-gnu/bits/wchar.h:
+
+/usr/include/openssl/symhacks.h:
+
+/usr/include/openssl/safestack.h:
+
+/usr/include/openssl/params.h:
+
 /usr/include/openssl/opensslv.h:
 
+/usr/include/openssl/objectserr.h:
+
+/usr/include/openssl/objects.h:
+
+/usr/include/openssl/obj_mac.h:
+
 /usr/include/openssl/macros.h:
+
+/usr/include/openssl/indicator.h:
+
+/usr/include/openssl/evp.h:
 
 /usr/include/x86_64-linux-gnu/asm/unistd_64.h:
 
 /usr/include/openssl/e_os2.h:
+
+/usr/include/x86_64-linux-gnu/bits/sigcontext.h:
+
+/usr/include/openssl/cryptoerr_legacy.h:
+
+/usr/include/openssl/cryptoerr.h:
+
+/usr/include/openssl/core_dispatch.h:
+
+/usr/include/openssl/bn.h:
+
+/usr/include/openssl/bioerr.h:
+
+/usr/include/openssl/asn1err.h:
+
+/usr/include/openssl/asn1.h:
 
 /usr/include/nlohmann/thirdparty/hedley/hedley.hpp:
 
@@ -1849,6 +1903,8 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 /usr/include/c++/14/string:
 
 /usr/include/c++/14/stop_token:
+
+/usr/include/c++/14/stdlib.h:
 
 /usr/include/c++/14/sstream:
 
@@ -2288,6 +2344,8 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/boost/asio/traits/prefer_member.hpp:
 
+/usr/include/openssl/crypto.h:
+
 /usr/include/boost/predef/language/objc.h:
 
 /usr/include/x86_64-linux-gnu/sys/epoll.h:
@@ -2510,6 +2568,8 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/boost/asio/ip/v6_only.hpp:
 
+/usr/include/openssl/bio.h:
+
 /usr/include/c++/14/pstl/glue_algorithm_defs.h:
 
 /usr/include/boost/asio/execution/schedule.hpp:
@@ -2634,6 +2694,8 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/boost/asio/use_awaitable.hpp:
 
+/usr/include/openssl/types.h:
+
 /usr/include/nlohmann/json_fwd.hpp:
 
 /usr/include/boost/mpl/aux_/config/compiler.hpp:
@@ -2692,6 +2754,8 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/boost/asio/detail/scoped_lock.hpp:
 
+/usr/include/c++/14/thread:
+
 /usr/include/boost/asio/traits/schedule_free.hpp:
 
 /usr/include/c++/14/ext/concurrence.h:
@@ -2719,6 +2783,8 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 /usr/include/boost/predef/architecture/alpha.h:
 
 /usr/include/boost/config/no_tr1/cmath.hpp:
+
+/usr/include/openssl/core.h:
 
 /usr/include/boost/asio/basic_signal_set.hpp:
 
@@ -3524,6 +3590,8 @@ client: /lib/x86_64-linux-gnu/libc.so.6 \
 
 /usr/include/boost/mpl/aux_/comparison_op.hpp:
 
+/usr/include/openssl/bnerr.h:
+
 /usr/include/c++/14/bits/streambuf.tcc:
 
 /usr/include/boost/asio/detail/array.hpp:
@@ -3751,6 +3819,8 @@ CMakeFiles/client.dir/client.cpp.o:
 /usr/include/x86_64-linux-gnu/bits/sigevent-consts.h:
 
 /usr/include/boost/predef/architecture/pyramid.h:
+
+/usr/include/openssl/stack.h:
 
 /usr/include/boost/predef/architecture/riscv.h:
 
@@ -3999,6 +4069,8 @@ CMakeFiles/client.dir/client.cpp.o:
 /usr/lib/gcc/x86_64-linux-gnu/14/libgcc_s.so:
 
 /usr/include/c++/14/compare:
+
+/usr/include/openssl/evperr.h:
 
 /usr/include/boost/preprocessor/array/data.hpp:
 

@@ -275,31 +275,43 @@ inline std::vector<uint8_t> aes256_key_from_scalar(long long a0) {
 }
 inline std::vector<uint8_t> aes256_encrypt(const std::string& plaintext, long long a0) {
     auto key = aes256_key_from_scalar(a0);
+    // 将明文 zero-pad 到 16 字节（1 个 AES 分组）
     std::vector<uint8_t> padded(16, 0);
     size_t n = std::min(plaintext.size(), (size_t)16);
     memcpy(padded.data(), plaintext.data(), n);
-    std::vector<uint8_t> ct(16);
-    int outlen = 0;
+
+    // 输出缓冲：Update 最多 16 字节，Final_ex 最多 16 字节（no-padding 时为 0）
+    std::vector<uint8_t> ct(32, 0);
+    int outlen1 = 0, outlen2 = 0;
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     EVP_EncryptInit_ex(ctx, EVP_aes_256_ecb(), nullptr, key.data(), nullptr);
-    EVP_CIPHER_CTX_set_padding(ctx, 0);
-    EVP_EncryptUpdate(ctx, ct.data(), &outlen, padded.data(), 16);
+    EVP_CIPHER_CTX_set_padding(ctx, 0);          // 禁用内置 padding，输入必须对齐分组
+    EVP_EncryptUpdate(ctx, ct.data(), &outlen1, padded.data(), 16);
+    EVP_EncryptFinal_ex(ctx, ct.data() + outlen1, &outlen2); // 刷出缓冲区
     EVP_CIPHER_CTX_free(ctx);
+    ct.resize(outlen1 + outlen2);
     return ct;
 }
-inline std::string aes256_decrypt(const std::vector<uint8_t>& ct, long long a0) {
+
+inline std::string aes256_decrypt(const std::vector<uint8_t>& ciphertext, long long a0) {
     auto key = aes256_key_from_scalar(a0);
-    std::vector<uint8_t> pt(16, 0);
-    int outlen = 0;
+    // 输出缓冲：Update 最多 16 字节，Final_ex 最多 16 字节
+    std::vector<uint8_t> pt(32, 0);
+    int outlen1 = 0, outlen2 = 0;
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     EVP_DecryptInit_ex(ctx, EVP_aes_256_ecb(), nullptr, key.data(), nullptr);
     EVP_CIPHER_CTX_set_padding(ctx, 0);
-    EVP_DecryptUpdate(ctx, pt.data(), &outlen, ct.data(), 16);
+    EVP_DecryptUpdate(ctx, pt.data(), &outlen1, ciphertext.data(), (int)ciphertext.size());
+    EVP_DecryptFinal_ex(ctx, pt.data() + outlen1, &outlen2); // 刷出缓冲区
     EVP_CIPHER_CTX_free(ctx);
-    std::string result(pt.begin(), pt.end());
-    auto pos = result.find('\0');
-    if (pos != std::string::npos) result.resize(pos);
-    return result;
+
+    // 去除 zero-padding，还原原始明文
+    int total = outlen1 + outlen2;
+    int pw_len = total;
+    for (int i = 0; i < total; ++i) {
+        if (pt[i] == 0) { pw_len = i; break; }
+    }
+    return std::string(pt.begin(), pt.begin() + pw_len);
 }
 
 // ============================================================
