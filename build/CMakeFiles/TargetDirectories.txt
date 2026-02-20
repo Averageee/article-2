@@ -1,0 +1,5 @@
+/home/average/secondcode/code/build/CMakeFiles/server.dir
+/home/average/secondcode/code/build/CMakeFiles/device.dir
+/home/average/secondcode/code/build/CMakeFiles/client.dir
+/home/average/secondcode/code/build/CMakeFiles/edit_cache.dir
+/home/average/secondcode/code/build/CMakeFiles/rebuild_cache.dir
