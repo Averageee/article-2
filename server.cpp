@@ -278,12 +278,45 @@ struct Connection : std::enable_shared_from_this<Connection> {
 };
 
 // ============================================================
+// 辅助：带重试的设备连接（最多 retry 次，间隔 delay_ms 毫秒）
+// ============================================================
+static bool send_share_to_device(int id, int x, long long y,
+                                  int retries = 10, int delay_ms = 1000) {
+    for (int attempt = 1; attempt <= retries; ++attempt) {
+        try {
+            boost::asio::io_context d_ioc;
+            tcp::socket d_sock(d_ioc);
+            d_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"),
+                            (unsigned short)(DEVICE_BASE_PORT + id)});
+            json s_json; s_json["uid"] = "__global__"; s_json["x"] = x; s_json["y"] = y;
+            send_packet(d_sock, Msg_Phase1_Share, s_json);
+            return true;
+        } catch (const std::exception&) {
+            if (attempt < retries) {
+                std::cout << "  [Wait] Device " << id
+                          << " not ready, retry " << attempt << "/" << retries
+                          << " in " << delay_ms << "ms...\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            }
+        }
+    }
+    return false;
+}
+
+// ============================================================
 // 控制台线程：Phase 1 — 分发份额
 // ============================================================
 void console_thread() {
     std::cout << "\n[Console] Enter total number of auxiliary devices: ";
     int N; std::cin >> N; std::cin.ignore();
     global_N = N;
+
+    // 提示用户确保设备已启动
+    std::cout << "[Console] Please start device 1~" << N
+              << " (ports " << DEVICE_BASE_PORT + 1
+              << "~" << DEVICE_BASE_PORT + N << ").\n"
+              << "[Console] Press Enter when all devices are ready...";
+    { std::string dummy; std::getline(std::cin, dummy); }
 
     Timer tmr;
     Logger::print_phase("Phase 1: Secret Sharing (Server)");
@@ -298,20 +331,16 @@ void console_thread() {
     // Shamir (k=N, n=N) — 每个设备一个份额，阈值 = N
     Poly sp(N - 1, global_s);
     Logger::print_sep();
+    bool all_ok = true;
     for (int i = 1; i <= N; ++i) {
         long long y = sp.eval(i);
         Logger::print_kv("  Share dev" + std::to_string(i)
                          + " (x=" + std::to_string(i) + ")", y);
-        // 发送份额给设备
-        try {
-            boost::asio::io_context d_ioc;
-            tcp::socket d_sock(d_ioc);
-            d_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"),
-                            (unsigned short)(DEVICE_BASE_PORT + i)});
-            json s_json; s_json["uid"] = "__global__"; s_json["x"] = i; s_json["y"] = y;
-            send_packet(d_sock, Msg_Phase1_Share, s_json);
-        } catch (const std::exception& e) {
-            std::cerr << "  [Error] Dev" << i << ": " << e.what() << "\n";
+        if (send_share_to_device(i, i, y)) {
+            Logger::print_kv("  -> Sent to Device " + std::to_string(i), "OK");
+        } else {
+            Logger::print_kv("  -> Device " + std::to_string(i), "FAILED (skipped)");
+            all_ok = false;
         }
     }
 
@@ -321,8 +350,12 @@ void console_thread() {
     global_s = 0;
 
     Logger::print_time(tmr.ms());
-    phase1_done = true;
-    std::cout << "[Server] Phase 1 done. Waiting for client registration...\n";
+    if (all_ok) {
+        phase1_done = true;
+        std::cout << "[Server] Phase 1 done. Waiting for client registration...\n";
+    } else {
+        std::cerr << "[Server] Phase 1 INCOMPLETE: some devices unreachable.\n";
+    }
 }
 
 // ============================================================
