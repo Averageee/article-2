@@ -191,10 +191,17 @@ void password_recovery(const std::string& uid) {
 
     std::string bio_input;
     std::cout << " [Input] Biometric (fingerprint string): ";
-    std::cin >> bio_input; std::cin.ignore();
+    std::getline(std::cin, bio_input);
+
+    // 调试：显示注册时存储的 theta 前缀和本次计算值，方便比对
+    std::string theta_now = bytes_to_hex(H1("bio_theta|" + bio_input));
+    Logger::print_kv("bio_input",                bio_input);
+    Logger::print_kv("bio_input len",            (long long)bio_input.size());
+    Logger::print_kv("theta (stored SC, head)",  sc.theta_bio.substr(0, 16) + "...");
+    Logger::print_kv("theta (computed, head)",   theta_now.substr(0, 16) + "...");
 
     std::string sigma_check = rep_bio(bio_input, sc.theta_bio);
-    Logger::print_kv("sigma (computed)",  sigma_check);
+    Logger::print_kv("sigma (computed)",  sigma_check.empty() ? "(empty—theta mismatch)" : sigma_check);
     Logger::print_kv("sigma (stored SC)", sc.sigma_bio);
     if (sigma_check != sc.sigma_bio) {
         Logger::print_kv("Biometric", "FAIL"); return;
@@ -325,7 +332,8 @@ int main() {
         Logger::print_time(t_phase2);
     }
 
-    std::cout << "\n--- Press Enter to start login ---"; std::cin.ignore();
+    std::cout << "\n--- Press Enter to start login ---";
+    { std::string dummy; std::getline(std::cin, dummy); }
 
     // ===========================================================
     // Phase 3: 本地 Ti 验证 + 份额收集
@@ -406,7 +414,7 @@ int main() {
 
     // 密码恢复演示
     std::cout << "\n--- Press Enter for password recovery demo ---";
-    std::cin.ignore();
+    { std::string dummy; std::getline(std::cin, dummy); }
     password_recovery(uid);
 
     return 0;

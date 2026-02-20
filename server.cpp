@@ -35,9 +35,23 @@ struct Connection : std::enable_shared_from_this<Connection> {
 
     void run() {
         try {
-            Packet p = read_packet(sock);
-            if      (p.type == Msg_Phase2_RegReq)     handle_reg(p);
-            else if (p.type == Msg_Phase4_VerifyReq)  handle_verify(p);
+            // 同一 TCP 连接上循环处理：Phase 2 注册 → Phase 4/5 认证
+            while (true) {
+                Packet p = read_packet(sock);
+                if (p.type == Msg_Phase2_RegReq) {
+                    handle_reg(p);
+                    // 继续等待同一连接上的 Phase 4 请求
+                } else if (p.type == Msg_Phase4_VerifyReq) {
+                    handle_verify(p);
+                    break;  // 认证完成，关闭连接
+                } else {
+                    break;
+                }
+            }
+        } catch (const boost::system::system_error& e) {
+            // EOF 表示客户端正常关闭，不打印错误
+            if (e.code() != boost::asio::error::eof)
+                std::cerr << "[Server] Connection error: " << e.what() << "\n";
         } catch (const std::exception& e) {
             std::cerr << "[Server] Connection error: " << e.what() << "\n";
         }
