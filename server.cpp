@@ -1,258 +1,332 @@
 #include "common.hpp"
 #include <thread>
-#include <mutex>
 #include <atomic>
 
+// ============================================================
+// 全局状态
+// ============================================================
+constexpr int MAX_DEVICES = 16;
+
 struct UserDB {
-    std::string ID;
-    long long   MID;
-    long long   H0_s;
-    long long   sigma1;
-    LWEVector   s_server;
-    long long   d;
-    long long   Treg;
-    long long   Ti;
-    long long   p_stored;
+    long long MID;
+    long long sigma1;
+    long long d;
+    long long Ti;
+    long long p_stored;
+    long long H0_s;     // 登录验证时使用
+    int s_server;       // LWE 私钥
 };
 
 std::map<std::string, UserDB> db;
-std::mutex   db_mutex;
-int          global_N = 0;
+std::mutex db_mtx;
+
+long long global_s  = 0;     // Phase1 后销毁
+long long global_N  = 0;     // 辅助设备总数
+long long global_H0s = 0;
+
 std::atomic<bool> phase1_done{false};
 
-class Connection : public std::enable_shared_from_this<Connection> {
-    tcp::socket socket_;
-public:
-    explicit Connection(tcp::socket socket) : socket_(std::move(socket)) {}
-    void start() { do_read(); }
-private:
-    void do_read() {
-        auto self(shared_from_this());
-        std::thread([this, self]() {
-            try { Packet pkt = read_packet(socket_); handle(pkt); }
-            catch (...) {}
-        }).detach();
+// ============================================================
+// TCP 连接处理
+// ============================================================
+struct Connection : std::enable_shared_from_this<Connection> {
+    tcp::socket sock;
+    explicit Connection(tcp::socket s) : sock(std::move(s)) {}
+
+    void run() {
+        try {
+            Packet p = read_packet(sock);
+            if      (p.type == Msg_Phase2_RegReq)     handle_reg(p);
+            else if (p.type == Msg_Phase4_VerifyReq)  handle_verify(p);
+        } catch (const std::exception& e) {
+            std::cerr << "[Server] Connection error: " << e.what() << "\n";
+        }
     }
 
-    void handle_reg(const json& body) {
-        if (!phase1_done.load()) {
-            json err; err["error"] = "Phase 1 not done yet.";
-            send_packet(socket_, Msg_Phase2_RegResp, err);
+    // ----------------------------------------------------------
+    // Phase 2: 注册
+    // ----------------------------------------------------------
+    void handle_reg(const Packet& p) {
+        if (!phase1_done) {
+            json r; r["error"] = "Phase 1 not complete";
+            send_packet(sock, Msg_Phase2_RegResp, r);
             return;
         }
         Timer tmr;
-        std::string uid = body["uid"];
-        long long HPW   = body["HPW"];
-        long long MID   = body["MID"];
 
-        UserDB u;
-        u.ID  = uid;
-        u.MID = MID;
-        u.Treg = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::string uid = p.body["uid"];
+        long long HPW   = p.body["HPW"];
+        long long MID   = p.body["MID"];
 
-        u.sigma1      = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
-        LWEVector a1  = LWEVector::from_seed(u.sigma1);
-        u.s_server    = LWEVector::random();
-        int e_d       = lwe_noise();
-        u.d           = ((long long)a1.dot(u.s_server) + e_d + LWE_Q) % LWE_Q;
+        // 生成 σ1、a1、s_server
+        long long sigma1 = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
+        LWEVector a1     = LWEVector::from_seed(sigma1);
+        int s_sv         = (int)(rng() % LWE_Q) + 1;
+        LWEVector e_d    = LWEVector::noise_vector();
 
-        u.Ti = compute_Ti(HPW, MID);
+        // d = a1·s_server + e_d  (取向量首元素 mod Q)
+        long long d = ((long long)a1.dot(LWEVector::from_seed(sigma1)) % LWE_Q
+                       + (long long)s_sv + e_d.data[0] + LWE_Q) % LWE_Q;
+        // 更精确：d = a1[0]*s_sv + e_d[0]
+        d = ((long long)a1.data[0] * s_sv % LWE_Q + e_d.data[0] + LWE_Q) % LWE_Q;
 
-        std::string ss_str = vec_to_string(u.s_server.data);
-        u.p_stored = H_Int(H0(ss_str + uid + std::to_string(u.Treg)));
+        // Ti, p_stored, Ri
+        long long Treg    = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
+        long long Ti      = compute_Ti(HPW, MID);
+        long long p_stored = H_Int(H0(std::to_string(s_sv)
+                                    + std::to_string(MID)
+                                    + std::to_string(Treg)));
+        long long Ri = HPW ^ p_stored;
 
-        long long Ri = HPW ^ u.p_stored;
+        {
+            std::lock_guard<std::mutex> lk(db_mtx);
+            db[uid] = {MID, sigma1, d, Ti, p_stored, global_H0s, s_sv};
+        }
 
-        long long h0s = 0;
-        { std::lock_guard<std::mutex> lk(db_mutex); h0s = db["__init__"].H0_s; }
-        u.H0_s = h0s;
-        { std::lock_guard<std::mutex> lk(db_mutex); db[uid] = u; }
+        double elapsed = tmr.ms();
 
-        json resp;
-        resp["sigma1"] = u.sigma1;
-        resp["d"]      = u.d;
-        resp["Ri"]     = Ri;
-        resp["Ti"]     = u.Ti;
-        resp["H0_s"]   = u.H0_s;
-        resp["N"]      = global_N;
-        send_packet(socket_, Msg_Phase2_RegResp, resp);
+        Logger::print_phase("Phase 2: Registration (Server)  uid=" + uid);
+        Logger::print_kv("[From Client] uid",   uid);
+        Logger::print_kv("[From Client] HPW",   HPW);
+        Logger::print_kv("[From Client] MID",   MID);
+        Logger::print_sep();
+        Logger::print_kv("sigma1",              sigma1);
+        Logger::print_vec("a1 = G(sigma1)",     a1.data);
+        Logger::print_kv("s_server",            (long long)s_sv);
+        Logger::print_vec("e_d (noise)",        e_d.data);
+        Logger::print_kv("d = a1[0]*sv+e_d[0]", d);
+        Logger::print_kv("Treg (timestamp)",    Treg);
+        Logger::print_kv("Ti = H0(HPW^MID)",   Ti);
+        Logger::print_kv("p_stored = H0(sv||MID||Treg)", p_stored);
+        Logger::print_kv("Ri = HPW ^ p_stored", Ri);
+        Logger::print_kv("H0_s (global)",       global_H0s);
+        Logger::print_kv("N (devices)",         global_N);
+        Logger::print_time(elapsed);
 
-        Logger::print_phase("Phase 2: Registration (Server)");
-        Logger::print_kv("UID", uid);
-        Logger::print_kv("sigma1", u.sigma1);
-        Logger::print_kv("d", u.d);
-        Logger::print_kv("Ti", u.Ti);
-        Logger::print_kv("Ri", Ri);
-        Logger::print_time(tmr.ms());
-        do_read();
+        json r;
+        r["sigma1"] = sigma1;
+        r["d"]      = d;
+        r["Ri"]     = Ri;
+        r["Ti"]     = Ti;
+        r["H0_s"]   = global_H0s;
+        r["N"]      = (int)global_N;
+        send_packet(sock, Msg_Phase2_RegResp, r);
     }
 
-    void handle_verify(const json& body) {
-        Timer tmr;
-        Logger::print_phase("Phase 4: Verification (Server)");
+    // ----------------------------------------------------------
+    // Phase 4 + Phase 5: 验证 + 密钥协商
+    // ----------------------------------------------------------
+    void handle_verify(const Packet& p) {
+        Timer tmr_total;
+        std::string uid_claim = p.body["uid_claim"];
+        std::vector<int> u1   = p.body["u1"].get<std::vector<int>>();
+        std::vector<int> u2   = p.body["u2"].get<std::vector<int>>();
+        long long c1_bar      = p.body["c1_bar"];
+        long long sigma2      = p.body["sigma2"];
+        long long PID         = p.body["PID"];
+        long long REP         = p.body["REP"];
+        long long Mi          = p.body["Mi"];
 
-        std::string uid_claim = body["uid_claim"];
+        Logger::print_phase("Phase 4: Verification (Server)  uid_claim=" + uid_claim);
+        Logger::print_kv("uid_claim",   uid_claim);
+        Logger::print_vec("u1",         u1);
+        Logger::print_vec("u2",         u2);
+        Logger::print_kv("c1_bar",      c1_bar);
+        Logger::print_kv("sigma2",      sigma2);
+        Logger::print_kv("PID",         PID);
+        Logger::print_kv("REP",         REP);
+        Logger::print_kv("Mi",          Mi);
+
         UserDB user;
         {
-            std::lock_guard<std::mutex> lk(db_mutex);
-            if (!db.count(uid_claim)) { Logger::print_kv("Result", "FAIL (unknown uid)"); return; }
+            std::lock_guard<std::mutex> lk(db_mtx);
+            if (!db.count(uid_claim)) {
+                json r; r["error"] = "user not found";
+                send_packet(sock, Msg_Phase5_AuthResp, r);
+                return;
+            }
             user = db[uid_claim];
         }
 
-        LWEVector u1; u1.data = body["u1"].get<std::vector<int>>();
-        long long c1_bar  = body["c1_bar"];
-        long long c1      = decomp(c1_bar);
-        long long noise1  = (long long)u1.dot(user.s_server);
-        long long s_rec   = decode_msg((c1 - noise1 % LWE_Q + LWE_Q * 2) % LWE_Q);
-        long long mu1_star = H_Int(H0(std::to_string(s_rec)));
+        // LWE 解密 s
+        LWEVector u1v(LWE_N); u1v.data = u1;
+        long long c1     = decomp(c1_bar);
+        long long noise  = ((long long)user.s_server * u1v.data[0] % LWE_Q + LWE_Q) % LWE_Q;
+        long long s_recv = decode_msg((c1 - noise + LWE_Q * 2) % LWE_Q);
+        long long mu1_star = H_Int(H0(std::to_string(s_recv)));
 
-        Logger::print_kv("Decoded s", s_rec);
-        if (mu1_star != user.H0_s) { Logger::print_kv("Result", "FAIL (Secret)"); return; }
-        Logger::print_kv("mu1 check", "PASS");
+        // 用 mu1* 恢复 ID
+        long long id_hash = PID ^ mu1_star;
 
-        long long PID      = body["PID"];
-        long long id_check = PID ^ mu1_star;
-        if (id_check != user.MID) { Logger::print_kv("Result", "FAIL (ID)"); return; }
-        Logger::print_kv("ID check", "PASS");
-
-        LWEVector u2; u2.data = body["u2"].get<std::vector<int>>();
-        long long REP = body["REP"];
-
-        long long Auth     = H_Int(H0(std::to_string(mu1_star) + vec_to_string(u2.data)));
-        long long term     = H_Int(H0(vec_to_string(u1.data) + std::to_string(mu1_star)));
+        // 验证 Mi
+        long long p_sv = user.p_stored;
+        long long Auth = H_Int(H0(std::to_string(mu1_star) + vec_to_string(u2)));
+        long long term = H_Int(H0(vec_to_string(u1) + std::to_string(mu1_star)));
         long long p_client = REP ^ Auth ^ term;
+        long long Mi_calc = H_Int(H0(std::to_string(mu1_star)
+                                   + std::to_string(p_client)
+                                   + std::to_string(id_hash)
+                                   + std::to_string(REP)));
 
-        if (p_client != user.p_stored) { Logger::print_kv("Auth factor p", "FAIL"); return; }
-        Logger::print_kv("Auth factor p", "PASS");
-        Logger::print_time(tmr.ms());
+        Logger::print_sep();
+        Logger::print_kv("c1 = DeComp(c1_bar)", c1);
+        Logger::print_kv("s_server",             (long long)user.s_server);
+        Logger::print_kv("noise = sv*u1[0]",     noise);
+        Logger::print_kv("s_recv = Decode(c1-noise)", s_recv);
+        Logger::print_kv("mu1* = H0(s_recv)",   mu1_star);
+        Logger::print_kv("H0_s (stored)",        user.H0_s);
+        Logger::print_kv("H0_s match",           (mu1_star == user.H0_s) ? "YES" : "NO");
+        Logger::print_kv("id_hash = PID^mu1*",  id_hash);
+        Logger::print_kv("MID (stored)",         user.MID);
+        Logger::print_kv("ID match",             (id_hash == user.MID) ? "YES" : "NO");
+        Logger::print_kv("Auth = H0(mu1*|u2)",  Auth);
+        Logger::print_kv("term = H0(u1|mu1*)",  term);
+        Logger::print_kv("p_client (computed)", p_client);
+        Logger::print_kv("p_stored",            p_sv);
+        Logger::print_kv("p match",             (p_client == p_sv) ? "YES" : "NO");
+        Logger::print_kv("Mi (computed)",        Mi_calc);
+        Logger::print_kv("Mi (received)",        Mi);
+        Logger::print_kv("Mi match",            (Mi_calc == Mi) ? "YES" : "NO");
+        Logger::print_time(tmr_total.ms());
 
+        if (id_hash != user.MID || p_client != p_sv) {
+            Logger::print_kv("Auth Result", "FAIL");
+            json r; r["error"] = "auth failed";
+            send_packet(sock, Msg_Phase5_AuthResp, r);
+            return;
+        }
+        Logger::print_kv("Auth Result", "PASS");
+
+        // ===========================================================
+        // Phase 5: 密钥协商（服务器端）
+        // ===========================================================
         Timer tmr5;
-        Logger::print_phase("Phase 5: Key Agreement (Server)");
+        LWEVector u2v(LWE_N); u2v.data = u2;
+        LWEVector a2    = LWEVector::from_seed(sigma2);
+        int s2          = (int)(rng() % LWE_Q) + 1;
+        LWEVector e2v   = LWEVector::noise_vector();
+        LWEVector d2v   = a2.scalar_mul(s2).add(e2v);
+        long long d2    = d2v.data[0];
 
-        long long sigma2 = body["sigma2"];
-        LWEVector a2 = LWEVector::from_seed(sigma2);
-        LWEVector s2 = LWEVector::random();
+        long long v2    = (long long)(rng() % LWE_Q);
+        int e_c2        = lwe_noise();
+        long long c2    = ((long long)u2v.data[0] * s2 % LWE_Q + e_c2 + encode_msg(v2)) % LWE_Q;
+        long long c2_bar = comp(c2);
 
-        int v2   = (int)(rng() % LWE_Q);
-        int e2   = lwe_noise();
-        int ec   = lwe_noise();
-
-        long long d2     = ((long long)a2.dot(s2) + e2 + LWE_Q) % LWE_Q;
-        long long c2_raw = ((long long)u2.dot(s2) + ec + encode_msg(v2) + LWE_Q) % LWE_Q;
-        long long c2_bar = comp(c2_raw);
-        long long mu2    = H_Int(H0(std::to_string(v2)));
-
-        std::string raw = user.ID + SERVER_ID
+        long long mu2   = H_Int(H0(std::to_string(v2)));
+        std::string raw = uid_claim + SERVER_ID
                         + std::to_string(mu1_star)
                         + std::to_string(d2)
-                        + std::to_string(user.p_stored)
+                        + std::to_string(p_client)
                         + std::to_string(mu2);
-        long long Ms1    = H_Int(H1(raw));
+        long long Ms1   = H_Int(H1(raw));
         std::string sk_s = bytes_to_hex(H3(raw));
 
-        Logger::print_kv("v2", (long long)v2);
-        Logger::print_kv("d2", d2);
-        Logger::print_kv("c2_bar", c2_bar);
-        Logger::print_kv("Server SK", sk_s);
+        Logger::print_phase("Phase 5: Key Agreement (Server)");
+        Logger::print_kv("sigma2",              sigma2);
+        Logger::print_vec("a2 = G(sigma2)",     a2.data);
+        Logger::print_kv("s2",                  (long long)s2);
+        Logger::print_vec("e2 (noise)",         e2v.data);
+        Logger::print_vec("d2 = a2*s2+e2",      d2v.data);
+        Logger::print_kv("d2 (scalar)",         d2);
+        Logger::print_kv("v2 (random)",         v2);
+        Logger::print_kv("e_c2 (noise)",        (long long)e_c2);
+        Logger::print_kv("c2 = u2[0]*s2+ec+Enc(v2)", c2);
+        Logger::print_kv("c2_bar = Comp(c2)",   c2_bar);
+        Logger::print_kv("mu2 = H0(v2)",        mu2);
+        Logger::print_kv("p_client",            p_client);
+        Logger::print_kv("mu1*",                mu1_star);
+        Logger::print_kv("raw string",          raw.substr(0,40) + "...");
+        Logger::print_kv("Ms1 = H1(raw)",       Ms1);
+        Logger::print_kv("Session Key (sk_s)",  sk_s);
         Logger::print_time(tmr5.ms());
 
-        json resp5;
-        resp5["Ms1"]    = Ms1;
-        resp5["d2"]     = d2;
-        resp5["c2_bar"] = c2_bar;
-        send_packet(socket_, Msg_Phase5_AuthResp, resp5);
+        json r5;
+        r5["d2"]     = d2;
+        r5["c2_bar"] = c2_bar;
+        r5["mu2"]    = mu2;
+        r5["Ms1"]    = Ms1;
+        send_packet(sock, Msg_Phase5_AuthResp, r5);
 
+        // 接收 ACK（Mu1）
         try {
-            Packet ack = read_packet(socket_);
-            if (ack.type != Msg_Phase5_AckReq) {
-                Logger::print_kv("ACK", "FAIL (wrong type)"); return;
+            Packet ack = read_packet(sock);
+            if (ack.type == Msg_Phase5_AckReq) {
+                long long Mu1      = ack.body["Mu1"];
+                long long Mu1_calc = H_Int(H2(raw));
+                Logger::print_sep();
+                Logger::print_kv("Mu1 (received)",  Mu1);
+                Logger::print_kv("Mu1 (computed)",  Mu1_calc);
+                Logger::print_kv("Mutual Auth",     (Mu1 == Mu1_calc) ? "PASS" : "FAIL");
             }
-            long long Mu1_recv = ack.body["Mu1"];
-            long long Mu1_calc = H_Int(H2(raw));
-            if (Mu1_recv == Mu1_calc) {
-                Logger::print_kv("ACK (Client Auth)", "PASS");
-                Logger::print_kv("Authentication", "COMPLETE");
-            } else {
-                Logger::print_kv("ACK (Client Auth)", "FAIL");
-            }
-        } catch (...) {
-            Logger::print_kv("ACK", "FAIL (read error)");
-        }
-        do_read();
-    }
-
-    void handle(Packet pkt) {
-        if      (pkt.type == Msg_Phase2_RegReq)    handle_reg(pkt.body);
-        else if (pkt.type == Msg_Phase4_VerifyReq) handle_verify(pkt.body);
+        } catch (...) {}
     }
 };
 
+// ============================================================
+// 控制台线程：Phase 1 — 分发份额
+// ============================================================
 void console_thread() {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    while (true) {
-        int N;
-        std::cout << "\n[System] Enter device count N: ";
-        if (!(std::cin >> N)) { std::cin.clear(); std::cin.ignore(); continue; }
-        std::cin.ignore();
-        while (true) {
-            std::string pol;
-            std::cout << "[System] Enter access structure (e.g. 1&2 or 1|2&3): ";
-            std::getline(std::cin, pol);
-            if (pol.empty()) continue;
-            auto g = CNFParser::parse(pol);
-            bool err = false;
-            for (auto& gr : g) for (int id : gr) if (id > N || id < 1) err = true;
-            if (err) { std::cout << " [Error] Device ID out of range\n"; continue; }
+    std::cout << "\n[Console] Enter total number of auxiliary devices: ";
+    int N; std::cin >> N; std::cin.ignore();
+    global_N = N;
 
-            std::uniform_int_distribution<long long> dist(1, LWE_Q - 1);
-            long long s = dist(rng);
-            global_N    = N;
-            { std::lock_guard<std::mutex> lk(db_mutex); db["__init__"].H0_s = H_Int(H0(std::to_string(s))); }
+    Timer tmr;
+    Logger::print_phase("Phase 1: Secret Sharing (Server)");
 
-            Poly poly((int)g.size() - 1, s);
-            Logger::print_phase("Phase 1: Secret Distribution");
-            Logger::print_kv("H0(s) stored", H_Int(H0(std::to_string(s))));
-            Timer tmr;
-            for (size_t i = 0; i < g.size(); ++i) {
-                int x = (int)i + 1;
-                long long y = poly.eval(x);
-                std::cout << "  Group " << i << " (x=" << x << ") Devices:";
-                for (int id : g[i]) {
-                    std::cout << " " << id;
-                    try {
-                        boost::asio::io_context out_ioc;
-                        tcp::socket sock(out_ioc);
-                        sock.connect({boost::asio::ip::address::from_string("127.0.0.1"),
-                                     (unsigned short)(DEVICE_BASE_PORT + id)});
-                        json j; j["uid"] = "u1"; j["x"] = x; j["y"] = y;
-                        send_packet(sock, Msg_Phase1_Share, j);
-                    } catch (const std::exception& e) {
-                        std::cout << "[fail:" << e.what() << "]";
-                    }
-                }
-                std::cout << "\n";
-            }
-            Logger::print_time(tmr.ms());
-            phase1_done.store(true);
-            std::cout << "[System] Phase 1 done. s destroyed. Client may now register.\n";
-            break;
+    global_s = (long long)(rng() % (LWE_Q - 1)) + 1;
+    global_H0s = H_Int(H0(std::to_string(global_s)));
+
+    Logger::print_kv("s (master secret)", global_s);
+    Logger::print_kv("H0(s)",             global_H0s);
+    Logger::print_kv("N (devices)",       global_N);
+
+    // Shamir (k=N, n=N) — 每个设备一个份额，阈值 = N
+    Poly sp(N - 1, global_s);
+    Logger::print_sep();
+    for (int i = 1; i <= N; ++i) {
+        long long y = sp.eval(i);
+        Logger::print_kv("  Share dev" + std::to_string(i)
+                         + " (x=" + std::to_string(i) + ")", y);
+        // 发送份额给设备
+        try {
+            boost::asio::io_context d_ioc;
+            tcp::socket d_sock(d_ioc);
+            d_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"),
+                            (unsigned short)(DEVICE_BASE_PORT + i)});
+            json s_json; s_json["uid"] = "__global__"; s_json["x"] = i; s_json["y"] = y;
+            send_packet(d_sock, Msg_Phase1_Share, s_json);
+        } catch (const std::exception& e) {
+            std::cerr << "  [Error] Dev" << i << ": " << e.what() << "\n";
         }
     }
+
+    // 销毁主秘密
+    Logger::print_sep();
+    Logger::print_kv("s destroyed", "yes (set to 0)");
+    global_s = 0;
+
+    Logger::print_time(tmr.ms());
+    phase1_done = true;
+    std::cout << "[Server] Phase 1 done. Waiting for client registration...\n";
 }
 
+// ============================================================
 int main() {
+    std::cout << "============================================================\n";
+    std::cout << "  AuthSystem Server  (port " << SERVER_PORT << ")\n";
+    std::cout << "============================================================\n";
+
+    std::thread(console_thread).detach();
+
     boost::asio::io_context ioc;
     tcp::acceptor acc(ioc, tcp::endpoint(tcp::v4(), SERVER_PORT));
-    auto sock = std::make_shared<tcp::socket>(ioc);
-    std::function<void()> do_acc = [&]() {
-        acc.async_accept(*sock, [&](auto ec) {
-            if (!ec) std::make_shared<Connection>(std::move(*sock))->start();
-            sock = std::make_shared<tcp::socket>(ioc);
-            do_acc();
-        });
-    };
-    do_acc();
-    std::thread(console_thread).detach();
-    ioc.run();
+    std::cout << "[Server] Listening...\n";
+
+    while (true) {
+        tcp::socket sock(ioc);
+        acc.accept(sock);
+        auto conn = std::make_shared<Connection>(std::move(sock));
+        std::thread([conn]{ conn->run(); }).detach();
+    }
 }

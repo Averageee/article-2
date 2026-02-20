@@ -51,13 +51,28 @@ public:
         std::cout << "--------------------------------------------------" << std::endl;
     }
     static void print_kv(const std::string& key, const std::string& val) {
-        std::cout << " [*] " << std::left << std::setw(22) << key << ": " << val << std::endl;
+        std::cout << " [*] " << std::left << std::setw(24) << key << ": " << val << std::endl;
     }
     static void print_kv(const std::string& key, long long val) {
-        std::cout << " [*] " << std::left << std::setw(22) << key << ": " << val << std::endl;
+        std::cout << " [*] " << std::left << std::setw(24) << key << ": " << val << std::endl;
     }
+    // 打印 int 向量（显示前 max_show 个元素）
+    static void print_vec(const std::string& key, const std::vector<int>& v,
+                          size_t max_show = 6) {
+        std::stringstream ss; ss << "[";
+        size_t show = std::min(max_show, v.size());
+        for (size_t i = 0; i < show; ++i) { ss << v[i]; if (i+1<show) ss << ", "; }
+        if (v.size() > max_show) ss << ", ...";
+        ss << "]  (len=" << v.size() << ")";
+        print_kv(key, ss.str());
+    }
+    // 打印分阶段耗时（统一格式）
     static void print_time(double ms) {
-        std::cout << " [Time]: " << ms << " ms" << std::endl;
+        std::cout << " [Phase Time] " << std::fixed << std::setprecision(3)
+                  << ms << " ms" << std::endl;
+    }
+    static void print_sep() {
+        std::cout << "--------------------------------------------------" << std::endl;
     }
 };
 
