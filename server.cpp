@@ -13,8 +13,8 @@ struct UserDB {
     long long d;
     long long Ti;
     long long p_stored;
-    long long H0_s;     // 登录验证时使用
-    int s_server;       // LWE 私钥
+    long long H0_s;             // 登录验证时使用
+    std::vector<int> s_server;  // LWE 私钥向量（维度 LWE_N）
 };
 
 std::map<std::string, UserDB> db;
@@ -72,29 +72,27 @@ struct Connection : std::enable_shared_from_this<Connection> {
         long long HPW   = p.body["HPW"];
         long long MID   = p.body["MID"];
 
-        // 生成 σ1、a1、s_server
-        long long sigma1 = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
-        LWEVector a1     = LWEVector::from_seed(sigma1);
-        int s_sv         = (int)(rng() % LWE_Q) + 1;
-        LWEVector e_d    = LWEVector::noise_vector();
+        // 生成 σ1、a1、s_server（向量私钥）
+        long long sigma1      = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
+        LWEVector a1          = LWEVector::from_seed(sigma1);
+        LWEVector s_sv_vec    = LWEVector::random();   // LWE 私钥向量
+        int noise_d           = lwe_noise();
 
-        // d = a1·s_server + e_d  (取向量首元素 mod Q)
-        long long d = ((long long)a1.dot(LWEVector::from_seed(sigma1)) % LWE_Q
-                       + (long long)s_sv + e_d.data[0] + LWE_Q) % LWE_Q;
-        // 更精确：d = a1[0]*s_sv + e_d[0]
-        d = ((long long)a1.data[0] * s_sv % LWE_Q + e_d.data[0] + LWE_Q) % LWE_Q;
+        // d = a1·s_server + e  （真正的 LWE 内积，标量结果）
+        long long d = ((long long)a1.dot(s_sv_vec) + noise_d + LWE_Q) % LWE_Q;
 
         // Ti, p_stored, Ri
         long long Treg    = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
         long long Ti      = compute_Ti(HPW, MID);
-        long long p_stored = H_Int(H0(std::to_string(s_sv)
+        // p_stored = H0(s_server_vec || MID || Treg)，用向量字符串表示私钥
+        long long p_stored = H_Int(H0(vec_to_string(s_sv_vec.data)
                                     + std::to_string(MID)
                                     + std::to_string(Treg)));
         long long Ri = HPW ^ p_stored;
 
         {
             std::lock_guard<std::mutex> lk(db_mtx);
-            db[uid] = {MID, sigma1, d, Ti, p_stored, global_H0s, s_sv};
+            db[uid] = {MID, sigma1, d, Ti, p_stored, global_H0s, s_sv_vec.data};
         }
 
         double elapsed = tmr.ms();
@@ -104,14 +102,14 @@ struct Connection : std::enable_shared_from_this<Connection> {
         Logger::print_kv("[From Client] HPW",   HPW);
         Logger::print_kv("[From Client] MID",   MID);
         Logger::print_sep();
-        Logger::print_kv("sigma1",              sigma1);
-        Logger::print_vec("a1 = G(sigma1)",     a1.data);
-        Logger::print_kv("s_server",            (long long)s_sv);
-        Logger::print_vec("e_d (noise)",        e_d.data);
-        Logger::print_kv("d = a1[0]*sv+e_d[0]", d);
+        Logger::print_kv("sigma1",                  sigma1);
+        Logger::print_vec("a1 = G(sigma1)",         a1.data);
+        Logger::print_vec("s_server (vec)",         s_sv_vec.data);
+        Logger::print_kv("noise_d (scalar)",        (long long)noise_d);
+        Logger::print_kv("d = a1·s_server + noise", d);
         Logger::print_kv("Treg (timestamp)",    Treg);
         Logger::print_kv("Ti = H0(HPW^MID)",   Ti);
-        Logger::print_kv("p_stored = H0(sv||MID||Treg)", p_stored);
+        Logger::print_kv("p_stored = H0(s_vec||MID||Treg)", p_stored);
         Logger::print_kv("Ri = HPW ^ p_stored", Ri);
         Logger::print_kv("H0_s (global)",       global_H0s);
         Logger::print_kv("N (devices)",         global_N);
@@ -162,10 +160,11 @@ struct Connection : std::enable_shared_from_this<Connection> {
             user = db[uid_claim];
         }
 
-        // LWE 解密 s
+        // LWE 解密 s：s = Decode(c1 - u1·s_server)（向量内积）
         LWEVector u1v(LWE_N); u1v.data = u1;
+        LWEVector s_sv_vec; s_sv_vec.data = user.s_server;
         long long c1     = decomp(c1_bar);
-        long long noise  = ((long long)user.s_server * u1v.data[0] % LWE_Q + LWE_Q) % LWE_Q;
+        long long noise  = (long long)u1v.dot(s_sv_vec);
         long long s_recv = decode_msg((c1 - noise + LWE_Q * 2) % LWE_Q);
         long long mu1_star = H_Int(H0(std::to_string(s_recv)));
 
@@ -183,9 +182,9 @@ struct Connection : std::enable_shared_from_this<Connection> {
                                    + std::to_string(REP)));
 
         Logger::print_sep();
-        Logger::print_kv("c1 = DeComp(c1_bar)", c1);
-        Logger::print_kv("s_server",             (long long)user.s_server);
-        Logger::print_kv("noise = sv*u1[0]",     noise);
+        Logger::print_kv("c1 = DeComp(c1_bar)",     c1);
+        Logger::print_vec("s_server (vec)",          user.s_server);
+        Logger::print_kv("noise = u1·s_server",      noise);
         Logger::print_kv("s_recv = Decode(c1-noise)", s_recv);
         Logger::print_kv("mu1* = H0(s_recv)",   mu1_star);
         Logger::print_kv("H0_s (stored)",        user.H0_s);
@@ -255,10 +254,10 @@ struct Connection : std::enable_shared_from_this<Connection> {
         Logger::print_kv("Session Key (sk_s)",  sk_s);
         Logger::print_time(tmr5.ms());
 
+        // 只发 {Ms1, d2, c̄2}；μ2 隐藏在 LWE 结构中，由客户端解密 c̄2 自行恢复
         json r5;
         r5["d2"]     = d2;
         r5["c2_bar"] = c2_bar;
-        r5["mu2"]    = mu2;
         r5["Ms1"]    = Ms1;
         send_packet(sock, Msg_Phase5_AuthResp, r5);
 

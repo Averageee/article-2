@@ -189,6 +189,19 @@ void password_recovery(const std::string& uid) {
     Timer tmr_total;
     Logger::print_phase("Password Recovery Phase");
 
+    // Step 1: ID 验证 —— 智能卡先核对输入的 ID 与存储的 ID
+    std::string id_input;
+    std::cout << " [Input] User ID: ";
+    std::getline(std::cin, id_input);
+    Logger::print_kv("ID input",   id_input);
+    Logger::print_kv("ID stored",  sc.uid_stored);
+    if (id_input != sc.uid_stored) {
+        Logger::print_kv("ID Check", "FAIL");
+        return;
+    }
+    Logger::print_kv("ID Check", "PASS");
+
+    // Step 2: 生物特征验证
     std::string bio_input;
     std::cout << " [Input] Biometric (fingerprint string): ";
     std::getline(std::cin, bio_input);
@@ -208,16 +221,21 @@ void password_recovery(const std::string& uid) {
     }
     Logger::print_kv("Biometric", "PASS");
 
+    // βi = δi ⊕ H1(H2(Ansi) || (H2(IDi) mod n0))  与注册时对称
+    long long id_binding = H_Int(H2(uid)) % N0;
     std::map<int, long long> pts;
     Logger::print_sep();
+    Logger::print_kv("id_binding = H2(uid)%n0", id_binding);
     std::cout << " [Input] Answer security questions:\n";
     for (int i = 0; i < N_SECURITY_Q; ++i) {
         std::cout << "  Q" << (i+1) << ": " << SEC_QUESTIONS[i] << "\n  A: ";
         std::string ans; std::getline(std::cin, ans);
-        long long beta_i = sc.rec_delta[i] ^ H_Int(H1(ans));
-        Logger::print_kv("  H1(ans_" + std::to_string(i+1) + ")", H_Int(H1(ans)));
-        Logger::print_kv("  delta_"  + std::to_string(i+1),       sc.rec_delta[i]);
-        Logger::print_kv("  beta_"   + std::to_string(i+1) + " = delta^H1(ans)", beta_i);
+        std::string mask_str = bytes_to_hex(H2(ans)) + std::to_string(id_binding);
+        long long mask_val   = H_Int(H1(mask_str));
+        long long beta_i     = sc.rec_delta[i] ^ mask_val;
+        Logger::print_kv("  H1(H2(ans)||id_binding)_" + std::to_string(i+1), mask_val);
+        Logger::print_kv("  delta_"  + std::to_string(i+1),                   sc.rec_delta[i]);
+        Logger::print_kv("  beta_"   + std::to_string(i+1) + " = delta^mask", beta_i);
         pts[sc.rec_x[i]] = beta_i;
     }
 
@@ -294,10 +312,14 @@ int main() {
         std::uniform_int_distribution<long long> dist(1, N0 - 1);
         long long a0 = dist(rng);
         Poly key_poly(N_SECURITY_Q - 1, a0);
+        // δi = βi ⊕ H1(H2(Ansi) || (H2(IDi) mod n0))  绑定 ID，防止跨用户冒用
+        long long id_binding = H_Int(H2(uid)) % N0;
         for (int i = 0; i < N_SECURITY_Q; ++i) {
             long long beta_i   = key_poly.eval(i + 1);
             sc.rec_x[i]        = i + 1;
-            sc.rec_delta[i]    = beta_i ^ H_Int(H1(user_ans[i]));
+            std::string mask_str = bytes_to_hex(H2(user_ans[i]))
+                                   + std::to_string(id_binding);
+            sc.rec_delta[i]    = beta_i ^ H_Int(H1(mask_str));
         }
         sc.PWC_hex = bytes_to_hex(aes256_encrypt(pw, a0));
 
@@ -316,10 +338,12 @@ int main() {
         Logger::print_kv("theta_bio",          theta_bio.substr(0,16) + "...");
         Logger::print_sep();
         Logger::print_kv("a0 (poly secret)",   a0);
+        Logger::print_kv("id_binding = H2(uid)%n0", id_binding);
         for (int i = 0; i < N_SECURITY_Q; ++i) {
             Logger::print_kv("  beta_"  + std::to_string(i+1) + " = f(" + std::to_string(i+1) + ")",
                              key_poly.eval(i+1));
-            Logger::print_kv("  delta_" + std::to_string(i+1),   sc.rec_delta[i]);
+            Logger::print_kv("  delta_" + std::to_string(i+1) + " = beta^H1(H2(ans)||id_binding)",
+                             sc.rec_delta[i]);
         }
         Logger::print_kv("PWC = AES256_Enc(a0, pw)", sc.PWC_hex);
         Logger::print_sep();

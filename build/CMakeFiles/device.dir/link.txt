@@ -1,1 +1,1 @@
-/usr/bin/c++ -g -Wl,--dependency-file=CMakeFiles/device.dir/link.d CMakeFiles/device.dir/device.cpp.o -o device  -Wl,-rpath,/usr/local/lib /usr/lib/x86_64-linux-gnu/libcrypto.so /usr/lib/x86_64-linux-gnu/libboost_system.so.1.83.0 /usr/local/lib/liboqs.so -lpthread
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/device.dir/link.d CMakeFiles/device.dir/device.cpp.o -o device  -Wl,-rpath,/usr/local/lib /usr/lib/x86_64-linux-gnu/libcrypto.so /usr/lib/x86_64-linux-gnu/libboost_system.so.1.83.0 /usr/local/lib/liboqs.so -lpthread
