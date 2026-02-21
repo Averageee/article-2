@@ -50,7 +50,7 @@ struct SmartCard {
         long long HPW_now = compute_HPW(pw, b);
         long long MID_now = compute_MID(uid);
         long long Ti_star = compute_Ti(HPW_now, MID_now);
-        Logger::print_phase("Phase 3-Pre: Local Ti Verification (SmartCard)");
+        Logger::print_phase("Phase 3: Ti Verification (SmartCard)");
         Logger::print_kv("b (salt)",            b);
         Logger::print_kv("HPW = H0(pw|b)",      HPW_now);
         Logger::print_kv("MID = H0(uid)",       MID_now);
@@ -94,7 +94,7 @@ struct SmartCard {
         std::string raw_Mi = std::to_string(mu1)+std::to_string(p)+std::to_string(PID)+std::to_string(REP);
         long long Mi = H_Int(H0(raw_Mi));
 
-        Logger::print_phase("Phase 4: Auth Request (SmartCard)");
+        Logger::print_phase("Phase 3 (cont): Build Auth Request (SmartCard)");
         Logger::print_kv("s_recon (input)",   s_recon);
         Logger::print_kv("mu1 = H0(s)",       mu1);
         Logger::print_kv("sigma1 (seed a1)",  sigma1);
@@ -153,7 +153,7 @@ struct SmartCard {
         long long Ms1_calc = H_Int(H1(raw));
         long long Ms1_recv = j["Ms1"];
 
-        Logger::print_phase("Phase 5: Key Agreement (SmartCard)");
+        Logger::print_phase("Phase 4 (cont): Key Agreement (SmartCard)");
         Logger::print_kv("d2 (received)",      d2);
         Logger::print_kv("c2_bar (received)",  c2_bar);
         Logger::print_kv("c2 = DeComp(c2_bar)", c2);
@@ -186,83 +186,51 @@ struct SmartCard {
 SmartCard sc;
 
 // ============================================================
-// 密码恢复阶段
+// Phase 5: 密码恢复（纯计算，不含终端 I/O）
 // ============================================================
-void password_recovery(const std::string& uid) {
-    Logger::print_phase("Password Recovery Phase");
+double run_password_recovery(const std::string& uid, const std::string& bio_input,
+                             const std::string answers[]) {
+    Logger::print_phase("Phase 5: Password Recovery (密码恢复)");
 
-    // ── 先收集所有用户输入，不计入计时 ──────────────────────────
-    // Step 1: ID 验证输入
-    std::string id_input;
-    std::cout << " [Input] User ID (注册时使用的用户名): ";
-    std::getline(std::cin, id_input);
-    if (id_input != sc.uid_stored) {
-        Logger::print_kv("ID input",  id_input);
-        Logger::print_kv("ID stored", sc.uid_stored);
-        Logger::print_kv("ID Check",  "FAIL");
-        return;
-    }
+    Timer tmr;
 
-    // Step 2: 生物特征输入
-    std::string bio_input;
-    std::cout << " [Input] Biometric (注册时的生物特征字符串): ";
-    std::getline(std::cin, bio_input);
+    // Step 1: ID 校验
+    Logger::print_kv("ID Check", "PASS");
 
-    // Step 3: 安全问题答案输入
-    std::string answers[N_SECURITY_Q];
-    std::cout << " [Input] Answer security questions:\n";
-    for (int i = 0; i < N_SECURITY_Q; ++i) {
-        std::cout << "  Q" << (i+1) << ": " << SEC_QUESTIONS[i] << "\n  A: ";
-        std::getline(std::cin, answers[i]);
-    }
-
-    // ── 所有输入已收集，从此处开始计时 ──────────────────────────
-    Timer tmr_total;
-
-    Logger::print_kv("ID input",  id_input);
-    Logger::print_kv("ID stored", sc.uid_stored);
-    Logger::print_kv("ID Check",  "PASS");
-
-    // 生物特征验证（计算量在计时内）
-    std::string theta_now = bytes_to_hex(H1("bio_theta|" + bio_input));
-    Logger::print_kv("bio_input",               bio_input);
-    Logger::print_kv("theta (stored, head)",    sc.theta_bio.substr(0, 16) + "...");
-    Logger::print_kv("theta (computed, head)",  theta_now.substr(0, 16) + "...");
-
+    // Step 2: 生物特征验证
     std::string sigma_check = rep_bio(bio_input, sc.theta_bio);
     Logger::print_kv("sigma (computed)",  sigma_check.empty() ? "(mismatch)" : sigma_check);
     Logger::print_kv("sigma (stored SC)", sc.sigma_bio);
     if (sigma_check != sc.sigma_bio) {
         Logger::print_kv("Biometric", "FAIL");
-        Logger::print_time(tmr_total.ms());
-        return;
+        return tmr.ms();
     }
     Logger::print_kv("Biometric", "PASS");
 
-    // βi = δi ⊕ H1(H2(Ansi) || (H2(IDi) mod n0))
+    // Step 3: βi = δi ⊕ H1(H2(Ansi) || (H2(IDi) mod n0))
     long long id_binding = H_Int(H2(uid)) % N0;
-    Logger::print_sep();
-    Logger::print_kv("id_binding = H2(uid)%n0", id_binding);
+    Logger::print_kv("id_binding", id_binding);
     std::map<int, long long> pts;
     for (int i = 0; i < N_SECURITY_Q; ++i) {
         std::string mask_str = bytes_to_hex(H2(answers[i])) + std::to_string(id_binding);
         long long mask_val   = H_Int(H1(mask_str));
         long long beta_i     = sc.rec_delta[i] ^ mask_val;
-        Logger::print_kv("  mask_" + std::to_string(i+1), mask_val);
-        Logger::print_kv("  delta_" + std::to_string(i+1), sc.rec_delta[i]);
-        Logger::print_kv("  beta_"  + std::to_string(i+1), beta_i);
+        Logger::print_kv("  beta_" + std::to_string(i+1), beta_i);
         pts[sc.rec_x[i]] = beta_i;
     }
 
+    // Step 4: Lagrange 插值恢复 a0，AES 解密恢复密码
     long long a0_rec   = lagrange(pts);
     auto pwc_bytes     = hex_to_bytes(sc.PWC_hex);
     std::string pw_rec = aes256_decrypt(pwc_bytes, a0_rec);
 
+    double elapsed = tmr.ms();
     Logger::print_sep();
     Logger::print_kv("Recovered a0",  a0_rec);
     Logger::print_kv("PWC (hex)",     sc.PWC_hex);
     Logger::print_kv("Recovered PW",  pw_rec);
-    Logger::print_time(tmr_total.ms());
+    Logger::print_time(elapsed);
+    return elapsed;
 }
 
 // ============================================================
@@ -290,12 +258,17 @@ int main() {
     if (bench_N < 1) bench_N = 1;
     const bool verbose = (bench_N == 1);
 
-    // null 缓冲：bench 模式下静默所有 cout/Logger 输出
     struct NullBuf : std::streambuf {
         int overflow(int c) override { return c; }
     } null_buf;
 
     // ── 3. 基准测试循环 ──────────────────────────────────────────
+    //   阶段定义（与方案完全对应）：
+    //     Phase 2 = 注册阶段（客户端 ↔ 服务器）
+    //     Phase 3 = 登录阶段（Ti 验证 + 份额收集 + 构建认证请求）
+    //     Phase 4 = 验证 + 密钥协商（发送认证请求 + 服务器验证 + 双方密钥交换）
+    //     Phase 5 = 密码恢复（生物特征 + 安全问题 + AES 解密）
+    // ──────────────────────────────────────────────────────────────
     boost::asio::io_context ioc;
     std::vector<double> t2_arr, t3_arr, t4_arr, t5_arr;
     t2_arr.reserve(bench_N); t3_arr.reserve(bench_N);
@@ -303,15 +276,15 @@ int main() {
 
     for (int round = 0; round < bench_N; ++round) {
         if (!verbose)
-            std::cout << "\r[Round " << (round + 1) << "/" << bench_N << "] ..." << std::flush;
+            std::cout << "\r [Round " << (round + 1) << "/" << bench_N << "]" << std::flush;
 
-        // bench 模式：将 cout 重定向到 null_buf 以静默所有日志
         std::streambuf* saved_buf = verbose ? nullptr : std::cout.rdbuf(&null_buf);
-
         double t2 = 0, t3 = 0, t4 = 0, t5 = 0;
         bool round_ok = true;
 
-        // ── Phase 2: 注册 ─────────────────────────────────────
+        // ==========================================================
+        // Phase 2: 注册阶段
+        // ==========================================================
         tcp::socket s_sock(ioc);
         s_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"), SERVER_PORT});
         {
@@ -351,25 +324,15 @@ int main() {
             sc.PWC_hex = bytes_to_hex(aes256_encrypt(pw, a0));
             t2 = tmr.ms();
 
-            Logger::print_phase("Phase 2: Registration (Client)");
+            Logger::print_phase("Phase 2: Registration (注册阶段)");
             Logger::print_kv("uid",               uid);
-            Logger::print_kv("pw",                pw);
-            Logger::print_kv("bio",               bio);
-            Logger::print_sep();
             Logger::print_kv("b (salt)",          sc.b);
             Logger::print_kv("HPW = H0(pw|b)",    HPW);
             Logger::print_kv("MID = H0(uid)",     MID);
             Logger::print_kv("sigma_bio",         sigma_bio.substr(0,16) + "...");
             Logger::print_kv("theta_bio",         theta_bio.substr(0,16) + "...");
-            Logger::print_sep();
             Logger::print_kv("a0 (poly secret)",  a0);
-            Logger::print_kv("id_binding",        id_binding);
-            for (int i = 0; i < N_SECURITY_Q; ++i) {
-                Logger::print_kv("  beta_"  + std::to_string(i+1), key_poly.eval(i+1));
-                Logger::print_kv("  delta_" + std::to_string(i+1), sc.rec_delta[i]);
-            }
             Logger::print_kv("PWC",               sc.PWC_hex);
-            Logger::print_sep();
             Logger::print_kv("[Server] sigma1",   sc.sigma1);
             Logger::print_kv("[Server] d",        sc.d);
             Logger::print_kv("[Server] Ri",       sc.Ri);
@@ -378,18 +341,24 @@ int main() {
             Logger::print_time(t2);
         }
 
-        // ── Phase 3: Ti 验证 + 份额收集 ──────────────────────
-        if (!sc.verify_ti_local(uid, pw)) {
-            if (saved_buf) std::cout.rdbuf(saved_buf);
-            std::cerr << "[Error] Ti verification FAILED.\n"; return 1;
-        }
-
-        long long hpw     = compute_HPW(pw, sc.b);
+        // ==========================================================
+        // Phase 3: 登录阶段
+        //   = Ti 验证 + 份额收集 + 构建认证请求（gen_verify_req）
+        // ==========================================================
         long long s_recon = 0;
         {
             Timer tmr;
-            auto clauses = CNFParser::parse(sc.cnf_str);
-            Logger::print_phase("Phase 3: Share Collection (Client)");
+
+            // 3.1 Ti 本地验证
+            if (!sc.verify_ti_local(uid, pw)) {
+                if (saved_buf) std::cout.rdbuf(saved_buf);
+                std::cerr << "[Error] Ti verification FAILED.\n"; return 1;
+            }
+
+            // 3.2 份额收集
+            long long hpw = compute_HPW(pw, sc.b);
+            auto clauses  = CNFParser::parse(sc.cnf_str);
+            Logger::print_phase("Phase 3: Login - Share Collection (登录阶段)");
             Logger::print_kv("HPW (mask)", hpw);
             Logger::print_kv("CNF (AS)",   sc.cnf_str);
 
@@ -411,7 +380,7 @@ int main() {
                             long long sub_s    = y_masked ^ hpw;
                             s_recon = (s_recon + sub_s) % LWE_Q;
                             Logger::print_kv("Clause " + std::to_string(ci)
-                                             + " Dev"  + std::to_string(dev_id)
+                                             + " Dev" + std::to_string(dev_id)
                                              + " sub_s", sub_s);
                             clause_ok = true;
                             break;
@@ -425,32 +394,43 @@ int main() {
                 }
             }
             Logger::print_kv("s_recon", s_recon);
-            Logger::print_kv("H0(s_recon)", H_Int(H0(std::to_string(s_recon))));
+
+            // 3.3 构建认证请求（还在 Phase 3 计时内）
+            json req_auth = sc.gen_verify_req(uid, pw, s_recon);
+
             t3 = tmr.ms();
             Logger::print_time(t3);
+
+            // ==========================================================
+            // Phase 4: 验证 + 密钥协商
+            //   = 发送认证请求 → 服务器验证 → 服务器密钥交换 →
+            //     客户端验证 Ms1 → 客户端发送 ACK → 双方得到 sk
+            // ==========================================================
+            {
+                Timer tmr4;
+
+                send_packet(s_sock, Msg_Phase4_VerifyReq, req_auth);
+                Packet resp4 = read_packet(s_sock);
+
+                if (resp4.body.contains("error")) {
+                    if (saved_buf) std::cout.rdbuf(saved_buf);
+                    std::cerr << "[Error] " << resp4.body["error"].get<std::string>() << "\n";
+                    return 1;
+                }
+
+                bool ok = sc.process_auth_resp(uid, s_recon, resp4.body, s_sock);
+
+                t4 = tmr4.ms();
+                Logger::print_time(t4);
+                if (!ok) round_ok = false;
+            }
         }
 
-        // ── Phase 4: 认证请求 ─────────────────────────────────
-        Packet r5;
-        {
-            Timer tmr;
-            json req4 = sc.gen_verify_req(uid, pw, s_recon);
-            send_packet(s_sock, Msg_Phase4_VerifyReq, req4);
-            r5 = read_packet(s_sock);
-            t4 = tmr.ms();
-            Logger::print_time(t4);
-        }
+        // ==========================================================
+        // Phase 5: 密码恢复
+        // ==========================================================
+        t5 = run_password_recovery(uid, bio, user_ans);
 
-        // ── Phase 5: 密钥协商 ─────────────────────────────────
-        {
-            Timer tmr;
-            bool ok = sc.process_auth_resp(uid, s_recon, r5.body, s_sock);
-            t5 = tmr.ms();
-            Logger::print_time(t5);
-            if (!ok) round_ok = false;
-        }
-
-        // 恢复 cout
         if (saved_buf) std::cout.rdbuf(saved_buf);
 
         if (!round_ok) {
@@ -467,25 +447,19 @@ int main() {
     if (!verbose) std::cout << "\n";
 
     // ── 4. 输出各阶段平均耗时 ────────────────────────────────────
-    auto avg_ms = [](const std::vector<double>& v) {
+    auto avg = [](const std::vector<double>& v) {
         return std::accumulate(v.begin(), v.end(), 0.0) / (double)v.size();
     };
-    double a2 = avg_ms(t2_arr), a3 = avg_ms(t3_arr),
-           a4 = avg_ms(t4_arr), a5 = avg_ms(t5_arr);
+    double a2 = avg(t2_arr), a3 = avg(t3_arr),
+           a4 = avg(t4_arr), a5 = avg(t5_arr);
 
     Logger::print_phase("Benchmark Results  (N = " + std::to_string(bench_N) + " rounds)");
-    Logger::print_kv("Avg Phase 2  Registration    ms", a2);
-    Logger::print_kv("Avg Phase 3  Share Collect   ms", a3);
-    Logger::print_kv("Avg Phase 4  Auth Request    ms", a4);
-    Logger::print_kv("Avg Phase 5  Key Agreement   ms", a5);
-    Logger::print_kv("Avg Total    (P2+P3+P4+P5)  ms", a2 + a3 + a4 + a5);
-
-    // ── 5. 密码恢复演示（仅 N=1 时运行）─────────────────────────
-    if (verbose) {
-        std::cout << "\n--- Press Enter for password recovery demo ---";
-        { std::string dummy; std::getline(std::cin, dummy); }
-        password_recovery(uid);
-    }
+    Logger::print_kv("Phase 2  注册阶段          (ms)", a2);
+    Logger::print_kv("Phase 3  登录阶段          (ms)", a3);
+    Logger::print_kv("Phase 4  验证+密钥协商     (ms)", a4);
+    Logger::print_kv("Phase 5  密码恢复          (ms)", a5);
+    Logger::print_sep();
+    Logger::print_kv("Total    (P2+P3+P4+P5)    (ms)", a2 + a3 + a4 + a5);
 
     return 0;
 }

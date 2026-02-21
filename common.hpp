@@ -56,6 +56,10 @@ public:
     static void print_kv(const std::string& key, long long val) {
         std::cout << " [*] " << std::left << std::setw(24) << key << ": " << val << std::endl;
     }
+    static void print_kv(const std::string& key, double val) {
+        std::cout << " [*] " << std::left << std::setw(24) << key << ": "
+                  << std::fixed << std::setprecision(3) << val << std::endl;
+    }
     // 打印 int 向量（显示前 max_show 个元素）
     static void print_vec(const std::string& key, const std::vector<int>& v,
                           size_t max_show = 6) {
