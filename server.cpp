@@ -214,7 +214,7 @@ struct Connection : std::enable_shared_from_this<Connection> {
         Logger::print_kv("Auth Result", "PASS");
 
         // ===========================================================
-        // Phase 5: 密钥协商（服务器端）
+        // Phase 4 (cont): 密钥协商（服务器端）
         // ===========================================================
         Timer tmr5;
         LWEVector u2v(LWE_N); u2v.data = u2;
@@ -238,7 +238,7 @@ struct Connection : std::enable_shared_from_this<Connection> {
         long long Ms1   = H_Int(H1(raw));
         std::string sk_s = bytes_to_hex(H3(raw));
 
-        Logger::print_phase("Phase 5: Key Agreement (Server)");
+        Logger::print_phase("Phase 4 (cont): Key Agreement (Server)");
         Logger::print_kv("sigma2",              sigma2);
         Logger::print_vec("a2 = G(sigma2)",     a2.data);
         Logger::print_kv("s2",                  (long long)s2);
