@@ -23,6 +23,8 @@ std::mutex db_mtx;
 long long global_s  = 0;     // Phase1 后销毁
 long long global_N  = 0;     // 辅助设备总数
 long long global_H0s = 0;
+std::string global_cnf = "";                       // CNF 访问结构字符串
+std::vector<std::vector<int>> global_clauses;      // 解析后的子句列表
 
 std::atomic<bool> phase1_done{false};
 
@@ -122,6 +124,7 @@ struct Connection : std::enable_shared_from_this<Connection> {
         r["Ti"]     = Ti;
         r["H0_s"]   = global_H0s;
         r["N"]      = (int)global_N;
+        r["cnf"]    = global_cnf;   // 访问结构字符串，存入智能卡
         send_packet(sock, Msg_Phase2_RegResp, r);
     }
 
@@ -303,12 +306,25 @@ static bool send_share_to_device(int id, int x, long long y,
 }
 
 // ============================================================
-// 控制台线程：Phase 1 — 分发份额
+// 控制台线程：Phase 1 — 输入访问结构并分发子秘密
 // ============================================================
 void console_thread() {
     std::cout << "\n[Console] Enter total number of auxiliary devices: ";
     int N; std::cin >> N; std::cin.ignore();
     global_N = N;
+
+    // 输入 CNF 访问结构
+    std::cout << "[Console] Enter access structure (CNF format).\n"
+              << "          Each clause = (d1|d2|...), clauses joined by &.\n"
+              << "          Example for 3 devices: (1|2)&(3)\n"
+              << "          Device IDs must be in [1, " << N << "].\n"
+              << "          AS > ";
+    std::getline(std::cin, global_cnf);
+    global_clauses = CNFParser::parse(global_cnf);
+    if (global_clauses.empty()) {
+        std::cerr << "[Server] ERROR: empty or invalid access structure.\n";
+        return;
+    }
 
     // 提示用户确保设备已启动
     std::cout << "[Console] Please start device 1~" << N
@@ -320,33 +336,46 @@ void console_thread() {
     Timer tmr;
     Logger::print_phase("Phase 1: Secret Sharing (Server)");
 
-    global_s = (long long)(rng() % (LWE_Q - 1)) + 1;
+    global_s  = (long long)(rng() % (LWE_Q - 1)) + 1;
     global_H0s = H_Int(H0(std::to_string(global_s)));
 
     Logger::print_kv("s (master secret)", global_s);
     Logger::print_kv("H0(s)",             global_H0s);
-    Logger::print_kv("N (devices)",       global_N);
+    Logger::print_kv("CNF (AS)",          global_cnf);
 
-    // Shamir (k=N, n=N) — 每个设备一个份额，阈值 = N
-    Poly sp(N - 1, global_s);
+    int m = (int)global_clauses.size();
+
+    // 加法分割：s = sub_s[0] + sub_s[1] + ... + sub_s[m-1]  (mod LWE_Q)
+    // 每个子句分配一个子秘密；同一子句内所有设备共享该子秘密（1-of-k）
+    std::vector<long long> sub_s(m);
+    long long running_sum = 0;
+    for (int i = 0; i < m - 1; ++i) {
+        sub_s[i] = (long long)(rng() % LWE_Q);
+        running_sum = (running_sum + sub_s[i]) % LWE_Q;
+    }
+    sub_s[m - 1] = ((long long)global_s - running_sum % LWE_Q + LWE_Q) % LWE_Q;
+
     Logger::print_sep();
     bool all_ok = true;
-    for (int i = 1; i <= N; ++i) {
-        long long y = sp.eval(i);
-        Logger::print_kv("  Share dev" + std::to_string(i)
-                         + " (x=" + std::to_string(i) + ")", y);
-        if (send_share_to_device(i, i, y)) {
-            Logger::print_kv("  -> Sent to Device " + std::to_string(i), "OK");
-        } else {
-            Logger::print_kv("  -> Device " + std::to_string(i), "FAILED (skipped)");
-            all_ok = false;
+    for (int ci = 0; ci < m; ++ci) {
+        Logger::print_kv("  Clause " + std::to_string(ci) + " sub_s", sub_s[ci]);
+        for (int dev_id : global_clauses[ci]) {
+            // x 字段复用为 clause_id，y 为该子句的子秘密
+            if (send_share_to_device(dev_id, ci, sub_s[ci])) {
+                Logger::print_kv("  -> Device " + std::to_string(dev_id)
+                                 + " (clause " + std::to_string(ci) + ")", "OK");
+            } else {
+                Logger::print_kv("  -> Device " + std::to_string(dev_id), "FAILED");
+                all_ok = false;
+            }
         }
     }
 
-    // 销毁主秘密
+    // 销毁主秘密与子秘密
     Logger::print_sep();
     Logger::print_kv("s destroyed", "yes (set to 0)");
     global_s = 0;
+    std::fill(sub_s.begin(), sub_s.end(), 0);
 
     Logger::print_time(tmr.ms());
     if (all_ok) {

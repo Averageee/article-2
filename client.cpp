@@ -21,6 +21,7 @@ struct SmartCard {
     long long Ti;
     long long H0_s;
     int       N;
+    std::string cnf_str;      // CNF 访问结构，Phase 3 按此选择设备
 
     long long b;
     long long h_pw_stored;
@@ -34,12 +35,13 @@ struct SmartCard {
     int s2_prime;
 
     void store(const json& j) {
-        sigma1 = j["sigma1"];
-        d      = j["d"];
-        Ri     = j["Ri"];
-        Ti     = j["Ti"];
-        H0_s   = j["H0_s"];
-        N      = j["N"];
+        sigma1  = j["sigma1"];
+        d       = j["d"];
+        Ri      = j["Ri"];
+        Ti      = j["Ti"];
+        H0_s    = j["H0_s"];
+        N       = j["N"];
+        cnf_str = j["cnf"].get<std::string>();
     }
 
     // 本地 Ti* 验证（登录前验证 PW 和 SC）
@@ -186,67 +188,79 @@ SmartCard sc;
 // 密码恢复阶段
 // ============================================================
 void password_recovery(const std::string& uid) {
-    Timer tmr_total;
     Logger::print_phase("Password Recovery Phase");
 
-    // Step 1: ID 验证 —— 智能卡先核对输入的 ID 与存储的 ID
+    // ── 先收集所有用户输入，不计入计时 ──────────────────────────
+    // Step 1: ID 验证输入
     std::string id_input;
     std::cout << " [Input] User ID (注册时使用的用户名): ";
     std::getline(std::cin, id_input);
-    Logger::print_kv("ID input",   id_input);
-    Logger::print_kv("ID stored",  sc.uid_stored);
     if (id_input != sc.uid_stored) {
-        Logger::print_kv("ID Check", "FAIL");
+        Logger::print_kv("ID input",  id_input);
+        Logger::print_kv("ID stored", sc.uid_stored);
+        Logger::print_kv("ID Check",  "FAIL");
         return;
     }
-    Logger::print_kv("ID Check", "PASS");
 
-    // Step 2: 生物特征验证（替代密码，证明身份）
+    // Step 2: 生物特征输入
     std::string bio_input;
     std::cout << " [Input] Biometric (注册时的生物特征字符串): ";
     std::getline(std::cin, bio_input);
 
-    // 调试：显示注册时存储的 theta 前缀和本次计算值，方便比对
-    std::string theta_now = bytes_to_hex(H1("bio_theta|" + bio_input));
-    Logger::print_kv("bio_input",                bio_input);
-    Logger::print_kv("bio_input len",            (long long)bio_input.size());
-    Logger::print_kv("theta (stored SC, head)",  sc.theta_bio.substr(0, 16) + "...");
-    Logger::print_kv("theta (computed, head)",   theta_now.substr(0, 16) + "...");
-
-    std::string sigma_check = rep_bio(bio_input, sc.theta_bio);
-    Logger::print_kv("sigma (computed)",  sigma_check.empty() ? "(empty—theta mismatch)" : sigma_check);
-    Logger::print_kv("sigma (stored SC)", sc.sigma_bio);
-    if (sigma_check != sc.sigma_bio) {
-        Logger::print_kv("Biometric", "FAIL"); return;
-    }
-    Logger::print_kv("Biometric", "PASS");
-
-    // βi = δi ⊕ H1(H2(Ansi) || (H2(IDi) mod n0))  与注册时对称
-    long long id_binding = H_Int(H2(uid)) % N0;
-    std::map<int, long long> pts;
-    Logger::print_sep();
-    Logger::print_kv("id_binding = H2(uid)%n0", id_binding);
+    // Step 3: 安全问题答案输入
+    std::string answers[N_SECURITY_Q];
     std::cout << " [Input] Answer security questions:\n";
     for (int i = 0; i < N_SECURITY_Q; ++i) {
         std::cout << "  Q" << (i+1) << ": " << SEC_QUESTIONS[i] << "\n  A: ";
-        std::string ans; std::getline(std::cin, ans);
-        std::string mask_str = bytes_to_hex(H2(ans)) + std::to_string(id_binding);
+        std::getline(std::cin, answers[i]);
+    }
+
+    // ── 所有输入已收集，从此处开始计时 ──────────────────────────
+    Timer tmr_total;
+
+    Logger::print_kv("ID input",  id_input);
+    Logger::print_kv("ID stored", sc.uid_stored);
+    Logger::print_kv("ID Check",  "PASS");
+
+    // 生物特征验证（计算量在计时内）
+    std::string theta_now = bytes_to_hex(H1("bio_theta|" + bio_input));
+    Logger::print_kv("bio_input",               bio_input);
+    Logger::print_kv("theta (stored, head)",    sc.theta_bio.substr(0, 16) + "...");
+    Logger::print_kv("theta (computed, head)",  theta_now.substr(0, 16) + "...");
+
+    std::string sigma_check = rep_bio(bio_input, sc.theta_bio);
+    Logger::print_kv("sigma (computed)",  sigma_check.empty() ? "(mismatch)" : sigma_check);
+    Logger::print_kv("sigma (stored SC)", sc.sigma_bio);
+    if (sigma_check != sc.sigma_bio) {
+        Logger::print_kv("Biometric", "FAIL");
+        Logger::print_time(tmr_total.ms());
+        return;
+    }
+    Logger::print_kv("Biometric", "PASS");
+
+    // βi = δi ⊕ H1(H2(Ansi) || (H2(IDi) mod n0))
+    long long id_binding = H_Int(H2(uid)) % N0;
+    Logger::print_sep();
+    Logger::print_kv("id_binding = H2(uid)%n0", id_binding);
+    std::map<int, long long> pts;
+    for (int i = 0; i < N_SECURITY_Q; ++i) {
+        std::string mask_str = bytes_to_hex(H2(answers[i])) + std::to_string(id_binding);
         long long mask_val   = H_Int(H1(mask_str));
         long long beta_i     = sc.rec_delta[i] ^ mask_val;
-        Logger::print_kv("  H1(H2(ans)||id_binding)_" + std::to_string(i+1), mask_val);
-        Logger::print_kv("  delta_"  + std::to_string(i+1),                   sc.rec_delta[i]);
-        Logger::print_kv("  beta_"   + std::to_string(i+1) + " = delta^mask", beta_i);
+        Logger::print_kv("  mask_" + std::to_string(i+1), mask_val);
+        Logger::print_kv("  delta_" + std::to_string(i+1), sc.rec_delta[i]);
+        Logger::print_kv("  beta_"  + std::to_string(i+1), beta_i);
         pts[sc.rec_x[i]] = beta_i;
     }
 
-    long long a0_rec = lagrange(pts);
-    auto pwc_bytes   = hex_to_bytes(sc.PWC_hex);
+    long long a0_rec   = lagrange(pts);
+    auto pwc_bytes     = hex_to_bytes(sc.PWC_hex);
     std::string pw_rec = aes256_decrypt(pwc_bytes, a0_rec);
 
     Logger::print_sep();
-    Logger::print_kv("Recovered a0",   a0_rec);
-    Logger::print_kv("PWC (hex)",      sc.PWC_hex);
-    Logger::print_kv("Recovered PW",   pw_rec);
+    Logger::print_kv("Recovered a0",  a0_rec);
+    Logger::print_kv("PWC (hex)",     sc.PWC_hex);
+    Logger::print_kv("Recovered PW",  pw_rec);
     Logger::print_time(tmr_total.ms());
 }
 
@@ -353,6 +367,7 @@ int main() {
         Logger::print_kv("[From Server] Ti",     sc.Ti);
         Logger::print_kv("[From Server] H0_s",   sc.H0_s);
         Logger::print_kv("[From Server] N",      (long long)sc.N);
+        Logger::print_kv("[From Server] CNF",    sc.cnf_str);
         Logger::print_time(t_phase2);
     }
 
@@ -366,41 +381,52 @@ int main() {
         std::cerr << "[Error] Local Ti verification FAILED.\n"; return 1;
     }
 
-    std::map<int, long long> pts;
     long long hpw = compute_HPW(pw, sc.b);
     {
         Timer tmr;
+        // 按 CNF 访问结构，每个子句选一个可用设备，取回子秘密后加法重构 s
+        auto clauses = CNFParser::parse(sc.cnf_str);
         Logger::print_phase("Phase 3: Share Collection (Client)");
         Logger::print_kv("HPW (used as mask)", hpw);
-        for (int i = 1; i <= sc.N; ++i) {
-            try {
-                tcp::socket d_sock(ioc);
-                d_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"),
-                                (unsigned short)(DEVICE_BASE_PORT + i)});
-                json q; q["uid"] = uid; q["hpw_seed"] = hpw;
-                send_packet(d_sock, Msg_Phase3_FacReq, q);
-                Packet r = read_packet(d_sock);
-                if (r.body["ok"]) {
-                    long long y_masked = r.body["y_masked"];
-                    int x              = r.body["x"];
-                    long long y        = y_masked ^ hpw;
-                    pts[x] = y;
-                    Logger::print_kv("Dev" + std::to_string(i) + " y_masked", y_masked);
-                    Logger::print_kv("Dev" + std::to_string(i) + " y = y_m^HPW", y);
-                    Logger::print_kv("Dev" + std::to_string(i) + " x", (long long)x);
+        Logger::print_kv("CNF (AS)",           sc.cnf_str);
+
+        long long s_recon = 0;
+        for (int ci = 0; ci < (int)clauses.size(); ++ci) {
+            bool clause_ok = false;
+            for (int dev_id : clauses[ci]) {
+                try {
+                    tcp::socket d_sock(ioc);
+                    d_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"),
+                                    (unsigned short)(DEVICE_BASE_PORT + dev_id)});
+                    json q;
+                    q["uid"]       = uid;
+                    q["hpw_seed"]  = hpw;
+                    q["clause_id"] = ci;
+                    send_packet(d_sock, Msg_Phase3_FacReq, q);
+                    Packet r = read_packet(d_sock);
+                    if (r.body["ok"]) {
+                        long long y_masked = r.body["y_masked"];
+                        long long sub_s    = y_masked ^ hpw;
+                        s_recon = (s_recon + sub_s) % LWE_Q;
+                        Logger::print_kv("Clause " + std::to_string(ci)
+                                         + " Dev"  + std::to_string(dev_id)
+                                         + " y_masked", y_masked);
+                        Logger::print_kv("Clause " + std::to_string(ci)
+                                         + " sub_s = y_m^HPW", sub_s);
+                        clause_ok = true;
+                        break;   // 该子句已满足，跳转到下一个子句
+                    }
+                } catch (const std::exception& e) {
+                    std::cout << "  Dev" << dev_id << " failed: " << e.what() << "\n";
                 }
-            } catch (const std::exception& e) {
-                std::cout << "  Dev" << i << " failed: " << e.what() << "\n";
             }
+            if (!clause_ok)
+                std::cerr << "[Warn] Clause " << ci << " unsatisfied\n";
         }
 
-        long long s_recon = lagrange(pts);
         Logger::print_sep();
-        std::cout << " [Lagrange points]:\n";
-        for (auto& [x, y] : pts)
-            std::cout << "   (x=" << x << ", y=" << y << ")\n";
-        Logger::print_kv("s_recon = Lagrange(pts)", s_recon);
-        Logger::print_kv("H0(s_recon)",             H_Int(H0(std::to_string(s_recon))));
+        Logger::print_kv("s_recon (additive mod Q)", s_recon);
+        Logger::print_kv("H0(s_recon)",              H_Int(H0(std::to_string(s_recon))));
         t_phase3 = tmr.ms();
         Logger::print_time(t_phase3);
 
