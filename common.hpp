@@ -8,6 +8,8 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <thread>
+#include <atomic>
 #include <sstream>
 #include <iomanip>
 #include <cstring>
@@ -37,7 +39,8 @@ enum MsgType : uint32_t {
     Msg_Phase3_FacReq,  Msg_Phase3_FacResp,
     Msg_Phase4_VerifyReq,
     Msg_Phase5_AuthResp,
-    Msg_Phase5_AckReq   // 客户端向服务器发送 ACK（双向认证）
+    Msg_Phase5_AckReq,  // 客户端向服务器发送 ACK（双向认证）
+    Msg_BenchmarkSummary // Benchmark 结束后，客户端请求服务器输出汇总
 };
 
 // --- 全局 RNG ---
@@ -363,19 +366,44 @@ inline long long compute_Ti(long long HPW, long long MID) {
 }
 
 // ============================================================
+// --- 模拟网络延迟 ---
+// ============================================================
+// 模拟真实网络环境下的单向传输延迟（毫秒）。
+// 每次 send / read 各休眠 SIMULATED_DELAY_MS，一次请求-响应的 RTT ≈ 4×delay。
+// 设为 0 时不休眠（纯 localhost 测试）。
+inline int SIMULATED_DELAY_MS = 0;
+
+inline void sim_delay() {
+    if (SIMULATED_DELAY_MS > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(SIMULATED_DELAY_MS));
+}
+
+// ============================================================
+// --- 通信字节计数器（客户端侧使用，统计各阶段通信开销）---
+// ============================================================
+inline std::atomic<size_t> g_bytes_sent{0};
+inline std::atomic<size_t> g_bytes_recv{0};
+
+inline void reset_byte_counters() { g_bytes_sent = 0; g_bytes_recv = 0; }
+
+// ============================================================
 // --- 网络通信工具 ---
 // ============================================================
 inline void send_packet(tcp::socket& s, uint32_t t, const json& j) {
+    sim_delay();
     std::string b = j.dump();
     uint32_t h[2] = {htonl(t), htonl((uint32_t)b.size())};
     std::vector<uint8_t> buf(8 + b.size());
     memcpy(buf.data(), h, 8); memcpy(buf.data() + 8, b.data(), b.size());
     boost::asio::write(s, boost::asio::buffer(buf));
+    g_bytes_sent += buf.size();
 }
 struct Packet { uint32_t type; json body; };
 inline Packet read_packet(tcp::socket& s) {
+    sim_delay();
     uint32_t h[2]; boost::asio::read(s, boost::asio::buffer(h, 8));
     uint32_t len = ntohl(h[1]);
     std::vector<char> b(len); boost::asio::read(s, boost::asio::buffer(b));
+    g_bytes_recv += 8 + len;
     return {ntohl(h[0]), json::parse(std::string(b.begin(), b.end()))};
 }

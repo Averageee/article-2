@@ -28,6 +28,10 @@ std::vector<std::vector<int>> global_clauses;      // 解析后的子句列表
 
 std::atomic<bool> phase1_done{false};
 
+// Benchmark 累积计时
+std::vector<double> sv_t2_arr, sv_t4_verify_arr, sv_t4_ka_arr;
+std::mutex timing_mtx;
+
 // ============================================================
 // TCP 连接处理
 // ============================================================
@@ -45,7 +49,10 @@ struct Connection : std::enable_shared_from_this<Connection> {
                     // 继续等待同一连接上的 Phase 4 请求
                 } else if (p.type == Msg_Phase4_VerifyReq) {
                     handle_verify(p);
-                    break;  // 认证完成，关闭连接
+                    break;
+                } else if (p.type == Msg_BenchmarkSummary) {
+                    handle_summary();
+                    break;
                 } else {
                     break;
                 }
@@ -98,6 +105,7 @@ struct Connection : std::enable_shared_from_this<Connection> {
         }
 
         double elapsed = tmr.ms();
+        { std::lock_guard<std::mutex> lk(timing_mtx); sv_t2_arr.push_back(elapsed); }
 
         Logger::print_phase("Phase 2: Registration (Server)  uid=" + uid);
         Logger::print_kv("[From Client] uid",   uid);
@@ -207,7 +215,9 @@ struct Connection : std::enable_shared_from_this<Connection> {
         Logger::print_kv("Mi (computed)",        Mi_calc);
         Logger::print_kv("Mi (received)",        Mi);
         Logger::print_kv("Mi match",            (Mi_calc == Mi) ? "YES" : "NO");
-        Logger::print_time(tmr_total.ms());
+        double t4_verify = tmr_total.ms();
+        { std::lock_guard<std::mutex> lk(timing_mtx); sv_t4_verify_arr.push_back(t4_verify); }
+        Logger::print_time(t4_verify);
 
         if (id_hash != user.MID || p_client != p_sv) {
             Logger::print_kv("Auth Result", "FAIL");
@@ -261,7 +271,9 @@ struct Connection : std::enable_shared_from_this<Connection> {
         Logger::print_kv("raw string",          raw.substr(0,40) + "...");
         Logger::print_kv("Ms1 = H1(raw)",       Ms1);
         Logger::print_kv("Session Key (sk_s)",  sk_s);
-        Logger::print_time(tmr5.ms());
+        double t4_ka = tmr5.ms();
+        { std::lock_guard<std::mutex> lk(timing_mtx); sv_t4_ka_arr.push_back(t4_ka); }
+        Logger::print_time(t4_ka);
 
         json r5;
         r5["d2"]     = d2;
@@ -281,6 +293,45 @@ struct Connection : std::enable_shared_from_this<Connection> {
                 Logger::print_kv("Mutual Auth",     (Mu1 == Mu1_calc) ? "PASS" : "FAIL");
             }
         } catch (...) {}
+    }
+
+    // ----------------------------------------------------------
+    // Benchmark Summary: 返回服务器侧各阶段平均计时 + 存储开销
+    // ----------------------------------------------------------
+    void handle_summary() {
+        auto avg = [](const std::vector<double>& v) -> double {
+            if (v.empty()) return 0;
+            double s = 0; for (auto x : v) s += x;
+            return s / (double)v.size();
+        };
+        size_t n_rounds;
+        double a2, a4v, a4k;
+        {
+            std::lock_guard<std::mutex> lk(timing_mtx);
+            n_rounds = sv_t2_arr.size();
+            a2  = avg(sv_t2_arr);
+            a4v = avg(sv_t4_verify_arr);
+            a4k = avg(sv_t4_ka_arr);
+            sv_t2_arr.clear();
+            sv_t4_verify_arr.clear();
+            sv_t4_ka_arr.clear();
+        }
+
+        size_t storage_per_user = sizeof(long long) * 6 + sizeof(int) * LWE_N;
+
+        Logger::print_phase("Server Benchmark Summary (N=" + std::to_string(n_rounds) + ")");
+        Logger::print_kv("Avg Phase 2  注册 (ms)", a2);
+        Logger::print_kv("Avg Phase 4  验证 (ms)", a4v);
+        Logger::print_kv("Avg Phase 4  密钥协商 (ms)", a4k);
+        Logger::print_kv("Storage/user (bytes)", (long long)storage_per_user);
+
+        json resp;
+        resp["rounds"]       = n_rounds;
+        resp["avg_t2"]       = a2;
+        resp["avg_t4_verify"] = a4v;
+        resp["avg_t4_ka"]    = a4k;
+        resp["storage"]      = storage_per_user;
+        send_packet(sock, Msg_BenchmarkSummary, resp);
     }
 };
 

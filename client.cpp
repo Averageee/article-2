@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include <thread>
 #include <numeric>
+#include <optional>
 
 // ============================================================
 // 安全问题（题目固定，答案由用户注册时设置）
@@ -289,19 +290,27 @@ void password_recovery_interactive(const std::string& uid) {
 }
 
 // ============================================================
-// 单轮 Phase 2→4 执行（共用逻辑）
-// 返回 {t2, t3, t4}，失败返回空 vector
+// 单轮指标
 // ============================================================
-std::vector<double> run_one_round(
+struct RoundMetrics {
+    double t2 = 0, t3 = 0, t4 = 0;       // ms
+    size_t comm2 = 0, comm3 = 0, comm4 = 0; // bytes
+};
+
+// ============================================================
+// 单轮 Phase 2→4 执行（共用逻辑）
+// ============================================================
+std::optional<RoundMetrics> run_one_round(
         const std::string& uid, const std::string& pw, const std::string& bio,
         const std::string user_ans[], boost::asio::io_context& ioc) {
 
-    double t2 = 0, t3 = 0, t4 = 0;
+    RoundMetrics m;
 
     // Phase 2: 注册
     tcp::socket s_sock(ioc);
     s_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"), SERVER_PORT});
     {
+        reset_byte_counters();
         Timer tmr;
         sc.uid_stored = uid;
         sc.b          = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
@@ -318,7 +327,7 @@ std::vector<double> run_one_round(
 
         if (resp.body.contains("error")) {
             std::cerr << "[Error] " << resp.body["error"].get<std::string>() << "\n";
-            return {};
+            return std::nullopt;
         }
         sc.store(resp.body);
         sc.h_pw_stored = HPW;
@@ -335,7 +344,8 @@ std::vector<double> run_one_round(
             sc.rec_delta[i]      = beta_i ^ H_Int(H1(mask_str));
         }
         sc.PWC_hex = bytes_to_hex(aes256_encrypt(pw, a0));
-        t2 = tmr.ms();
+        m.t2 = tmr.ms();
+        m.comm2 = g_bytes_sent + g_bytes_recv;
 
         Logger::print_phase("Phase 2: Registration (注册阶段)");
         Logger::print_kv("uid",              uid);
@@ -347,18 +357,19 @@ std::vector<double> run_one_round(
         Logger::print_kv("[Server] Ri",      sc.Ri);
         Logger::print_kv("[Server] Ti",      sc.Ti);
         Logger::print_kv("[Server] CNF",     sc.cnf_str);
-        Logger::print_time(t2);
+        Logger::print_time(m.t2);
     }
 
     // Phase 3: 登录阶段 = Ti 验证 + 份额收集 + 构建认证请求
     long long s_recon = 0;
     json req_auth;
     {
+        reset_byte_counters();
         Timer tmr;
 
         if (!sc.verify_ti_local(uid, pw)) {
             std::cerr << "[Error] Ti verification FAILED.\n";
-            return {};
+            return std::nullopt;
         }
 
         long long hpw = compute_HPW(pw, sc.b);
@@ -398,30 +409,33 @@ std::vector<double> run_one_round(
         Logger::print_kv("s_recon", s_recon);
 
         req_auth = sc.gen_verify_req(uid, pw, s_recon);
-        t3 = tmr.ms();
-        Logger::print_time(t3);
+        m.t3 = tmr.ms();
+        m.comm3 = g_bytes_sent + g_bytes_recv;
+        Logger::print_time(m.t3);
     }
 
     // Phase 4: 验证 + 密钥协商
     {
+        reset_byte_counters();
         Timer tmr;
         send_packet(s_sock, Msg_Phase4_VerifyReq, req_auth);
         Packet resp4 = read_packet(s_sock);
 
         if (resp4.body.contains("error")) {
             std::cerr << "[Error] " << resp4.body["error"].get<std::string>() << "\n";
-            return {};
+            return std::nullopt;
         }
 
         if (!sc.process_auth_resp(uid, s_recon, resp4.body, s_sock)) {
             std::cerr << "[Error] Key agreement failed.\n";
-            return {};
+            return std::nullopt;
         }
-        t4 = tmr.ms();
-        Logger::print_time(t4);
+        m.t4 = tmr.ms();
+        m.comm4 = g_bytes_sent + g_bytes_recv;
+        Logger::print_time(m.t4);
     }
 
-    return {t2, t3, t4};
+    return m;
 }
 
 // ============================================================
@@ -454,14 +468,17 @@ int main() {
     // Mode 0: 完整交互流程
     // ===========================================================
     if (mode == 0) {
-        auto times = run_one_round(uid, pw, bio, user_ans, ioc);
-        if (times.empty()) return 1;
+        std::cout << " [Net]  Simulated one-way network delay (ms, 0=localhost): ";
+        std::cin >> SIMULATED_DELAY_MS; std::cin.ignore();
+        if (SIMULATED_DELAY_MS < 0) SIMULATED_DELAY_MS = 0;
+        auto res = run_one_round(uid, pw, bio, user_ans, ioc);
+        if (!res) return 1;
 
         Logger::print_phase("Timing Summary (Phase 2-4)");
-        Logger::print_kv("Phase 2  注册阶段      (ms)", times[0]);
-        Logger::print_kv("Phase 3  登录阶段      (ms)", times[1]);
-        Logger::print_kv("Phase 4  验证+密钥协商 (ms)", times[2]);
-        Logger::print_kv("Total    (P2+P3+P4)   (ms)", times[0] + times[1] + times[2]);
+        Logger::print_kv("Phase 2  注册阶段      (ms)", res->t2);
+        Logger::print_kv("Phase 3  登录阶段      (ms)", res->t3);
+        Logger::print_kv("Phase 4  验证+密钥协商 (ms)", res->t4);
+        Logger::print_kv("Total    (P2+P3+P4)   (ms)", res->t2 + res->t3 + res->t4);
 
         // 密码恢复：用户实时输入 ID、生物特征、安全问题答案
         std::cout << "\n--- Press Enter for password recovery demo ---";
@@ -479,55 +496,109 @@ int main() {
     std::cin >> bench_N; std::cin.ignore();
     if (bench_N < 1) bench_N = 1;
 
+    std::cout << " [Bench] Simulated one-way network delay (ms, 0=localhost): ";
+    std::cin >> SIMULATED_DELAY_MS; std::cin.ignore();
+    if (SIMULATED_DELAY_MS < 0) SIMULATED_DELAY_MS = 0;
+
     struct NullBuf : std::streambuf {
         int overflow(int c) override { return c; }
     } null_buf;
 
     std::vector<double> t2_arr, t3_arr, t4_arr, t5_arr;
+    std::vector<size_t> c2_arr, c3_arr, c4_arr;
     t2_arr.reserve(bench_N); t3_arr.reserve(bench_N);
     t4_arr.reserve(bench_N); t5_arr.reserve(bench_N);
+    c2_arr.reserve(bench_N); c3_arr.reserve(bench_N); c4_arr.reserve(bench_N);
 
     for (int round = 0; round < bench_N; ++round) {
         std::cout << "\r [Round " << (round + 1) << "/" << bench_N << "]" << std::flush;
 
-        // 静默日志
         std::streambuf* saved_buf = std::cout.rdbuf(&null_buf);
-
-        auto times = run_one_round(uid, pw, bio, user_ans, ioc);
-
+        auto res = run_one_round(uid, pw, bio, user_ans, ioc);
         std::cout.rdbuf(saved_buf);
 
-        if (times.empty()) {
+        if (!res) {
             std::cerr << "\n[Error] Round " << (round+1) << " failed.\n";
             return 1;
         }
 
-        // Phase 5: 密码恢复 bench
         std::cout.rdbuf(&null_buf);
         double t5 = run_password_recovery_bench(uid, bio, user_ans);
         std::cout.rdbuf(saved_buf);
 
-        t2_arr.push_back(times[0]);
-        t3_arr.push_back(times[1]);
-        t4_arr.push_back(times[2]);
+        t2_arr.push_back(res->t2); t3_arr.push_back(res->t3); t4_arr.push_back(res->t4);
+        c2_arr.push_back(res->comm2); c3_arr.push_back(res->comm3); c4_arr.push_back(res->comm4);
         t5_arr.push_back(t5);
     }
 
     std::cout << "\n";
 
-    auto avg = [](const std::vector<double>& v) {
+    auto avg_d = [](const std::vector<double>& v) {
         return std::accumulate(v.begin(), v.end(), 0.0) / (double)v.size();
     };
-    double a2 = avg(t2_arr), a3 = avg(t3_arr),
-           a4 = avg(t4_arr), a5 = avg(t5_arr);
+    auto avg_z = [](const std::vector<size_t>& v) {
+        double s = 0; for (auto x : v) s += x;
+        return s / (double)v.size();
+    };
+    double a2 = avg_d(t2_arr), a3 = avg_d(t3_arr),
+           a4 = avg_d(t4_arr), a5 = avg_d(t5_arr);
+    double ac2 = avg_z(c2_arr), ac3 = avg_z(c3_arr), ac4 = avg_z(c4_arr);
 
-    Logger::print_phase("Benchmark Results  (N = " + std::to_string(bench_N) + " rounds)");
-    Logger::print_kv("Phase 2  注册阶段          (ms)", a2);
-    Logger::print_kv("Phase 3  登录阶段          (ms)", a3);
-    Logger::print_kv("Phase 4  验证+密钥协商     (ms)", a4);
-    Logger::print_kv("Phase 5  密码恢复          (ms)", a5);
+    // ── 向 Server 请求服务器侧计时 + 存储信息 ──
+    int saved_delay = SIMULATED_DELAY_MS;
+    SIMULATED_DELAY_MS = 0;
+    double sv_a2 = 0, sv_a4v = 0, sv_a4k = 0;
+    size_t sv_storage = 0;
+    try {
+        tcp::socket sum_sock(ioc);
+        sum_sock.connect({boost::asio::ip::address::from_string("127.0.0.1"), SERVER_PORT});
+        json sq; sq["action"] = "summary";
+        send_packet(sum_sock, Msg_BenchmarkSummary, sq);
+        Packet sr = read_packet(sum_sock);
+        sv_a2  = sr.body["avg_t2"].get<double>();
+        sv_a4v = sr.body["avg_t4_verify"].get<double>();
+        sv_a4k = sr.body["avg_t4_ka"].get<double>();
+        sv_storage = sr.body["storage"].get<size_t>();
+    } catch (const std::exception& e) {
+        std::cerr << "[Warn] Failed to get server summary: " << e.what() << "\n";
+    }
+    SIMULATED_DELAY_MS = saved_delay;
+
+    // ── 计算存储开销 ──
+    size_t sc_storage = sizeof(long long) * 7 + sizeof(int) * 2
+                      + 64 * 2
+                      + sizeof(int) * N_SECURITY_Q
+                      + sizeof(long long) * N_SECURITY_Q
+                      + 32
+                      + sc.cnf_str.size() + sc.uid_stored.size();
+    size_t dev_storage = sizeof(int) + sizeof(long long);
+
+    // ── 输出 ──
+    Logger::print_phase("Client-side Timing  (N = " + std::to_string(bench_N) + ", delay = "
+                        + std::to_string(SIMULATED_DELAY_MS) + "ms)");
+    Logger::print_kv("Avg Phase 2  注册       (ms)", a2);
+    Logger::print_kv("Avg Phase 3  登录       (ms)", a3);
+    Logger::print_kv("Avg Phase 4  验证+密钥  (ms)", a4);
+    Logger::print_kv("Avg Phase 5  密码恢复   (ms)", a5);
     Logger::print_sep();
-    Logger::print_kv("Total    (P2+P3+P4+P5)    (ms)", a2 + a3 + a4 + a5);
+    Logger::print_kv("Avg Total (P2-P5)      (ms)", a2 + a3 + a4 + a5);
+
+    Logger::print_phase("Server-side Timing  (N = " + std::to_string(bench_N) + ")");
+    Logger::print_kv("Avg Phase 2  注册       (ms)", sv_a2);
+    Logger::print_kv("Avg Phase 4  验证       (ms)", sv_a4v);
+    Logger::print_kv("Avg Phase 4  密钥协商   (ms)", sv_a4k);
+
+    Logger::print_phase("Communication Cost  (per round, bytes)");
+    Logger::print_kv("Phase 2  注册           ", (long long)std::llround(ac2));
+    Logger::print_kv("Phase 3  登录           ", (long long)std::llround(ac3));
+    Logger::print_kv("Phase 4  验证+密钥      ", (long long)std::llround(ac4));
+    Logger::print_sep();
+    Logger::print_kv("Total                   ", (long long)std::llround(ac2 + ac3 + ac4));
+
+    Logger::print_phase("Storage Overhead  (bytes)");
+    Logger::print_kv("Server (per user)       ", (long long)sv_storage);
+    Logger::print_kv("SmartCard (client)      ", (long long)sc_storage);
+    Logger::print_kv("Device (per share)      ", (long long)dev_storage);
 
     return 0;
 }

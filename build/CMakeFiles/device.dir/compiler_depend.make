@@ -1159,6 +1159,7 @@ CMakeFiles/device.dir/device.cpp.o: /home/average/secondcode/code/device.cpp \
   /usr/include/c++/14/string \
   /usr/include/c++/14/string_view \
   /usr/include/c++/14/system_error \
+  /usr/include/c++/14/thread \
   /usr/include/c++/14/tr1/bessel_function.tcc \
   /usr/include/c++/14/tr1/beta_function.tcc \
   /usr/include/c++/14/tr1/ell_integral.tcc \
@@ -2790,6 +2791,8 @@ device: /lib/x86_64-linux-gnu/libc.so.6 \
 /usr/include/boost/asio/detail/scoped_lock.hpp:
 
 /usr/include/x86_64-linux-gnu/bits/wchar2.h:
+
+/usr/include/c++/14/thread:
 
 /usr/include/boost/asio/traits/schedule_free.hpp:
 
