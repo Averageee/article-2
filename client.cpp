@@ -191,7 +191,7 @@ void password_recovery(const std::string& uid) {
 
     // Step 1: ID 验证 —— 智能卡先核对输入的 ID 与存储的 ID
     std::string id_input;
-    std::cout << " [Input] User ID: ";
+    std::cout << " [Input] User ID (注册时使用的用户名): ";
     std::getline(std::cin, id_input);
     Logger::print_kv("ID input",   id_input);
     Logger::print_kv("ID stored",  sc.uid_stored);
@@ -201,9 +201,9 @@ void password_recovery(const std::string& uid) {
     }
     Logger::print_kv("ID Check", "PASS");
 
-    // Step 2: 生物特征验证
+    // Step 2: 生物特征验证（替代密码，证明身份）
     std::string bio_input;
-    std::cout << " [Input] Biometric (fingerprint string): ";
+    std::cout << " [Input] Biometric (注册时的生物特征字符串): ";
     std::getline(std::cin, bio_input);
 
     // 调试：显示注册时存储的 theta 前缀和本次计算值，方便比对
