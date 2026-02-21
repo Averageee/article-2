@@ -70,17 +70,23 @@ struct SmartCard {
         long long mu1 = H_Int(H0(std::to_string(s_recon)));
         LWEVector a1  = LWEVector::from_seed(sigma1);
 
-        int s1_p         = (int)(rng() % LWE_Q);
+        int s1_p         = lwe_noise();                  // 小秘密 ∈ [-η, η]
         LWEVector e1_vec = LWEVector::noise_vector();
         LWEVector u1     = a1.scalar_mul(s1_p).add(e1_vec);
 
-        int e_c      = lwe_noise();
-        long long c1_raw = ((long long)d * s1_p + e_c + encode_msg(s_recon)) % LWE_Q;
-        long long c1_bar = comp(c1_raw);
+        // 逐 bit 编码 s_recon
+        long long d_s1   = ((long long)d * s1_p % LWE_Q + LWE_Q) % LWE_Q;
+        auto s_bits      = value_to_bits(s_recon);
+        std::vector<long long> c1_arr(LWE_MSG_BITS);
+        for (int j = 0; j < LWE_MSG_BITS; ++j) {
+            int e_c_j        = lwe_noise();
+            long long c1_j   = (d_s1 + e_c_j + encode_bit(s_bits[j]) + LWE_Q) % LWE_Q;
+            c1_arr[j]        = comp(c1_j);
+        }
 
         long long sigma2 = (long long)(rng() & 0x7FFFFFFFFFFFFFFF);
         LWEVector a2     = LWEVector::from_seed(sigma2);
-        s2_prime         = (int)(rng() % LWE_Q);
+        s2_prime         = lwe_noise();                  // 小秘密 ∈ [-η, η]
         LWEVector e2_vec = LWEVector::noise_vector();
         LWEVector u2     = a2.scalar_mul(s2_prime).add(e2_vec);
 
@@ -99,15 +105,13 @@ struct SmartCard {
         Logger::print_kv("mu1 = H0(s)",       mu1);
         Logger::print_kv("sigma1 (seed a1)",  sigma1);
         Logger::print_vec("a1 (first 6)",     a1.data);
-        Logger::print_kv("s1'",               (long long)s1_p);
+        Logger::print_kv("s1' (small)",       (long long)s1_p);
         Logger::print_vec("e1' (noise)",      e1_vec.data);
         Logger::print_vec("u1 = a1*s1'+e1'",  u1.data);
-        Logger::print_kv("e_c' (noise)",      (long long)e_c);
-        Logger::print_kv("c1' = d*s1'+ec+Enc(s)", c1_raw);
-        Logger::print_kv("c1_bar = Comp(c1')", c1_bar);
+        Logger::print_kv("c1_arr (bits)",     (long long)c1_arr.size());
         Logger::print_kv("sigma2 (seed a2)",  sigma2);
         Logger::print_vec("a2 (first 6)",     LWEVector::from_seed(sigma2).data);
-        Logger::print_kv("s2'",               (long long)s2_prime);
+        Logger::print_kv("s2' (small)",       (long long)s2_prime);
         Logger::print_vec("e2' (noise)",      e2_vec.data);
         Logger::print_vec("u2 = a2*s2'+e2'",  u2.data);
         Logger::print_kv("HPW = H0(pw|b)",    HPW);
@@ -123,7 +127,7 @@ struct SmartCard {
         pkg["uid_claim"] = uid;
         pkg["u1"]        = u1.data;
         pkg["u2"]        = u2.data;
-        pkg["c1_bar"]    = c1_bar;
+        pkg["c1_bar"]    = c1_arr;
         pkg["sigma2"]    = sigma2;
         pkg["PID"]       = PID;
         pkg["REP"]       = REP;
@@ -136,11 +140,17 @@ struct SmartCard {
                            const json& j, tcp::socket& sock) {
         long long mu1    = H_Int(H0(std::to_string(s_recon)));
         long long d2     = j["d2"];
-        long long c2_bar = j["c2_bar"];
+        auto c2_bar_arr  = j["c2_bar"].get<std::vector<long long>>();
 
-        long long c2     = decomp(c2_bar);
-        long long noise2 = ((long long)d2 * s2_prime) % LWE_Q;
-        long long v2     = decode_msg((c2 - noise2 + LWE_Q * 2) % LWE_Q);
+        // 逐 bit 解密 v2
+        long long base_noise2 = ((long long)d2 * s2_prime % LWE_Q + LWE_Q) % LWE_Q;
+        std::vector<int> v2_bits(LWE_MSG_BITS);
+        for (int bj = 0; bj < LWE_MSG_BITS; ++bj) {
+            long long c2_j = decomp(c2_bar_arr[bj]);
+            long long val  = ((c2_j - base_noise2) % LWE_Q + LWE_Q) % LWE_Q;
+            v2_bits[bj]    = decode_bit(val);
+        }
+        long long v2     = bits_to_value(v2_bits);
         long long mu2    = H_Int(H0(std::to_string(v2)));
         long long p      = Ri ^ h_pw_stored;
 
@@ -154,12 +164,11 @@ struct SmartCard {
         long long Ms1_recv = j["Ms1"];
 
         Logger::print_phase("Phase 4 (cont): Key Agreement (SmartCard)");
-        Logger::print_kv("d2 (received)",      d2);
-        Logger::print_kv("c2_bar (received)",  c2_bar);
-        Logger::print_kv("c2 = DeComp(c2_bar)", c2);
-        Logger::print_kv("s2'",                (long long)s2_prime);
-        Logger::print_kv("noise = d2*s2'",     noise2);
-        Logger::print_kv("v2 = Decode(c2-noise)", v2);
+        Logger::print_kv("d2 (received)",       d2);
+        Logger::print_kv("c2_bar (bits)",       (long long)c2_bar_arr.size());
+        Logger::print_kv("s2' (small)",         (long long)s2_prime);
+        Logger::print_kv("base_noise = d2*s2'", base_noise2);
+        Logger::print_kv("v2 (bit-decoded)",    v2);
         Logger::print_kv("mu2 = H0(v2)",       mu2);
         Logger::print_kv("mu1 = H0(s)",        mu1);
         Logger::print_kv("p   = Ri ^ HPW",     p);

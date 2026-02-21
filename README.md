@@ -109,17 +109,24 @@ cd build
 ./client
 ```
 
-Client 自动执行以下交互流程：
+Client 启动后输入凭据和安全问题答案，然后选择运行模式：
 
 ```
-Phase 2  → 向 Server 注册（生成盐值 b、HPW、MID、生物特征处理、密钥恢复材料）
-           ↓  按 Enter
-Phase 3  → 从各 Device 收集份额，Lagrange 插值重构 s
-Phase 4  → 智能卡本地 Ti* 验证 → 发送 LWE 加密认证请求
-Phase 5  → 验证服务器 Ms1 → 发送 ACK → 双方输出相同会话密钥
-           ↓  按 Enter（可选）
-密码恢复  → 生物特征验证 → 安全问题回答 → AES 解密恢复 PW
+ [Mode] 0 = 完整交互流程 (含密码恢复输入)
+        1 = Benchmark (N 轮自动运行, 输出平均时间)
 ```
+
+**Mode 0（完整流程）**：
+
+```
+Phase 2  → 注册阶段（Client ↔ Server）
+Phase 3  → 登录阶段（Ti 验证 + 份额收集 + 构建认证请求）
+Phase 4  → 验证 + 密钥协商（发送 → 服务器验证 → 双方密钥交换）
+           ↓  按 Enter
+Phase 5  → 密码恢复（用户输入 ID、生物特征、安全问题 → 恢复密码）
+```
+
+**Mode 1（Benchmark）**：输入轮数 N，Phase 2→5 自动执行 N 轮，最后输出各阶段平均耗时。
 
 ### 5. 密码恢复演示
 
@@ -154,53 +161,99 @@ Server → Client : sigma1, d=a1·s_server+e, Ri=HPW⊕p, Ti, H0(s), N
 Client 本地生成 : Gen(Bio)=(σ,θ), 密钥恢复多项式 f(x), δ_i, PWC=AES256(PW)
 ```
 
-### 阶段三：份额收集
+### 阶段三：登录阶段
 
 ```
-Client → Device_i : uid, HPW
-Device_i → Client : y_masked = f(x_i) ⊕ HPW
-Client 本地计算   : y = y_masked ⊕ HPW → Lagrange 插值重构 s
+1. 客户端选择满足访问结构的设备集合
+2. Device_i → Client : y_masked = sub_s_i ⊕ HPW（子句子秘密掩码传输）
+3. Client 本地计算   : sub_s = y_masked ⊕ HPW → 加法重构 s = Σ sub_s_i (mod q)
+4. SmartCard 本地验证 Ti* == Ti（防暴力破解）
+5. 构建 LWE 加密认证请求：u1, u2, c̄1[12]=逐bit(d·s1'+e_c+encode_bit(s_j)), PID, REP, Mi
 ```
 
-### 阶段四：身份验证
+### 阶段四：验证 + 密钥协商（双向认证）
 
 ```
-SmartCard 本地验证 Ti* == Ti（防暴力破解）
-Client → Server : PID=MID⊕μ1, REP=(p⊕Auth)⊕H0(u1|μ1), u1, u2, c1_bar=Comp(d·s1'+Encode(s))
-Server 验证      : 解密 s, 还原 MID, 验证 p（三重认证）
-```
-
-### 阶段五：密钥协商（双向认证）
-
-```
-Server → Client : Ms1=H1(ID||SERVER_ID||μ1||d2||p||μ2), d2, c2_bar
-Client 验证 Ms1（服务器身份）
-Client → Server : Mu1=H2(ID||SERVER_ID||μ1||d2||p||μ2)（ACK）
+Client → Server : PID, REP, Mi, u1, u2, c̄1, σ2
+Server 验证      : LWE 解密恢复 s → 验证 H0(s) / ID / p / Mi（三重认证）
+Server → Client : Ms1=H1(IDi||IDs||μ1||d2||p||μ2), d2, c̄2
+Client 验证      : LWE 解密 c̄2 恢复 v2→μ2, 验证 Ms1（服务器身份）
+Client → Server : Mu1=H2(IDi||IDs||μ1||d2||p||μ2)（ACK）
 Server 验证 Mu1（客户端身份）
-双方计算         : sk_u = H3(ID||SERVER_ID||μ1||d2||p||μ2)
+双方计算         : sk_u = H3(IDi||IDs||μ1||d2||p||μ2)
 ```
 
-### 阶段五（密码恢复）
+### 阶段五：密码恢复
 
 ```
 本地操作（无需网络）：
-用户输入生物特征 Bio* → Rep(Bio*, θ) == σ ?
-用户回答安全问题 → 恢复 β_i → Lagrange 插值 → a0 → AES256.Dec(PWC) → PW
+1. 用户输入 ID* → 智能卡校验 ID* == ID_stored
+2. 用户输入 Bio* → Rep(Bio*, θ) == σ ?
+3. 用户回答安全问题 Ans_i → β_i = δ_i ⊕ H1(H2(Ans_i)||(H2(ID) mod n0))
+4. Lagrange 插值 → a0 = f(0)
+5. PW = AES256.Dec(a0, PWC)
 ```
 
 ---
 
-## 关键参数
+## 公共参数
+
+以下所有参数定义于 `common.hpp`，编译时为全局常量。
+
+### 密码学参数
+
+| 参数 | 符号 | 具体值 | 说明 |
+|------|------|--------|------|
+| LWE 向量维度 | n | `LWE_N = 1024` | 等效于 Kyber-1024（n=256 × k=4），NIST Level 5 安全等级（≈AES-256） |
+| LWE 模数 | q | `LWE_Q = 3329` | 所有 LWE 运算的有限域模数，取自 NIST ML-KEM (Kyber) 标准参数 |
+| LWE 噪声参数 | η | `LWE_NOISE_BOUND = 2` | 噪声/秘密采样范围 [-η, η]，等同 Kyber-1024 的 CBD(η=2) |
+| 逐 bit 编码位数 | — | `LWE_MSG_BITS = 12` | ⌈log₂(q)⌉ = 12，将消息逐 bit 编码为 12 个 LWE 密文 |
+| 多项式模数 | n₀ | `N0 = 1000000007` (10⁹+7) | Shamir 秘密共享与密码恢复多项式的有限域模数（大素数） |
+| 安全问题数量 | N | `N_SECURITY_Q = 3` | 密码恢复所需的安全问题数，即恢复多项式 f(x) 的阶数 = N-1 = 2 |
+| 服务器标识符 | ID_s | `SERVER_ID = "SERVER_001"` | 密钥协商阶段用于构造 Ms1/Mu1/sk_u 的服务器身份字符串 |
+
+### 哈希函数族
+
+| 函数 | 定义 | 用途 |
+|------|------|------|
+| H₀(·) | SHA-256("H0" \|\| input) | HPW、MID、Ti、μ₁=H₀(s)、p_stored、认证因子 p |
+| H₁(·) | SHA-256("H1" \|\| input) | Ms1 = H₁(ID_i \|\| ID_s \|\| μ₁ \|\| d₂ \|\| p \|\| μ₂)，密码恢复 δᵢ 掩码 |
+| H₂(·) | SHA-256("H2" \|\| input) | Mu1 = H₂(…)（ACK），密码恢复 ID 绑定 |
+| H₃(·) | SHA-256("H3" \|\| input) | 会话密钥 sk_u = H₃(ID_i \|\| ID_s \|\| μ₁ \|\| d₂ \|\| p \|\| μ₂) |
+| H_Int(·) | 取 SHA-256 输出前 8 字节转 63-bit 正整数 | 将哈希映射为可做算术运算的整数 |
+
+### LWE 编码函数（逐 bit 编码，Kyber 风格）
+
+| 函数 | 实现 | 说明 |
+|------|------|------|
+| encode_bit(b) | b × ⌊q/2⌋ = b × 1665 | 将 1 bit 编码到 [0, q) 区间，0→0，1→1665 |
+| decode_bit(v) | v ∈ [q/4, 3q/4) → 1，否则 → 0 | 最近邻判定，容许噪声 < q/4 ≈ 832 |
+| value_to_bits(s) | s 的 12-bit 二进制展开（LSB first） | 将消息拆分为 12 个 bit |
+| bits_to_value(bits) | 12-bit 重组为整数 | 从解码的 12 bit 恢复原始消息 |
+| Comp(c) / DeComp(c̄) | c mod q（恒等） | 密文压缩/解压（原型保持恒等） |
+
+### AES 参数
 
 | 参数 | 值 | 说明 |
-|------|----|------|
-| `LWE_N` | 64 | LWE 向量维度 |
-| `LWE_Q` | 3329 | LWE 模数（与 Kyber 一致） |
-| `LWE_NOISE_BOUND` | 0 | 噪声上界（原型设为 0 保证正确性） |
-| `N0` | 10^9+7 | 多项式模数 |
-| `N_SECURITY_Q` | 3 | 安全问题数量 |
-| `SERVER_PORT` | 9000 | 服务器监听端口 |
-| `DEVICE_BASE_PORT` | 9100 | 设备基础端口（设备 i 监听 9100+i） |
+|------|-----|------|
+| 算法 | AES-256-ECB | 用于加密密码恢复材料 PWC = AES_Enc(a₀, PW) |
+| 密钥生成 | key = H₀(a₀)[0:16] \|\| H₁(a₀)[0:16] | 从多项式秘密值 a₀ 派生 32 字节密钥 |
+| 分组大小 | 16 字节 | 密码明文 zero-pad 到 16 字节 |
+
+### 网络参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| 服务器端口 | `SERVER_PORT = 9000` | 认证服务器 TCP 监听端口 |
+| 设备基础端口 | `DEVICE_BASE_PORT = 9100` | 设备 i 监听端口 = 9100 + i |
+| 传输协议 | TCP（Boost.Asio） | 自定义二进制协议：4 字节消息类型 + 4 字节长度 + JSON body |
+
+### 生物特征参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| Gen(Bio) | σ = H₀("bio_sigma\|" + Bio), θ = H₁("bio_theta\|" + Bio) | 模糊提取器生成函数（简化为精确哈希） |
+| Rep(Bio*, θ) | 验证 H₁("bio_theta\|" + Bio*) == θ → 输出 σ | 模糊提取器恢复函数（精确匹配，非真实容错） |
 
 ---
 
@@ -221,7 +274,7 @@ code/
 
 | 项目 | 当前状态 | 生产环境建议 |
 |------|---------|-------------|
-| LWE 噪声 | `NOISE_BOUND=0`（无噪声，保证原型正确性） | 使用标准 Kyber 参数，配合 Encode/Decode 缩放 |
+| LWE 参数 | Kyber-1024 等效（n=1024, q=3329, η=2），逐 bit 编码保证正确解密 | 已对齐 NIST ML-KEM Level 5 标准参数 |
 | 生物特征匹配 | 精确字符串匹配 | 接入真实模糊提取器（容许传感器误差） |
 | 安全问题答案 | 硬编码在 `client.cpp` | 由用户在注册时交互输入 |
 | 传输信道 | 无 TLS | 注册阶段应使用 TLS 加密信道 |

@@ -22,13 +22,14 @@ using boost::asio::ip::tcp;
 // --- 全局参数 ---
 constexpr int    SERVER_PORT       = 9000;
 constexpr int    DEVICE_BASE_PORT  = 9100;
-constexpr int    LWE_N             = 64;
+// Kyber-1024 等效参数：n=256×k=4=1024 有效维度，q=3329，η=2
+constexpr int    LWE_N             = 1024;
 constexpr int    LWE_Q             = 3329;
-// LWE_NOISE_BOUND=0 保证原型正确解密；生产环境调大需配合 Encode 缩放
-constexpr int    LWE_NOISE_BOUND   = 0;
-constexpr long long N0             = 1000000007LL;  // Shamir/密钥恢复多项式模数
-constexpr int    N_SECURITY_Q      = 3;             // 安全问题数量
-const std::string SERVER_ID        = "SERVER_001";  // 服务器标识符，用于 Ms1/sk_u
+constexpr int    LWE_NOISE_BOUND   = 2;             // CBD(η=2)，噪声范围 [-2, 2]
+constexpr int    LWE_MSG_BITS      = 12;             // ⌈log₂(q)⌉ = 12，逐 bit 编码所需位数
+constexpr long long N0             = 1000000007LL;   // Shamir/密钥恢复多项式模数
+constexpr int    N_SECURITY_Q      = 3;              // 安全问题数量
+const std::string SERVER_ID        = "SERVER_001";   // 服务器标识符
 
 enum MsgType : uint32_t {
     Msg_Phase1_Share    = 1,
@@ -141,15 +142,27 @@ inline int lwe_noise() {
     return dist(rng);
 }
 
-// Encode: 将消息 m ∈ [0, LWE_Q) 编码到 LWE 密文空间
-// 当 LWE_NOISE_BOUND=0 时为恒等；调大噪声时可改为 m*(Q/t) 缩放
-inline long long encode_msg(long long m) {
-    return ((m % LWE_Q) + LWE_Q) % LWE_Q;
+// --- 逐 bit 编码/解码（Kyber 风格）---
+// Encode: 1 bit → ⌊q/2⌋ 缩放
+inline long long encode_bit(int bit) {
+    return (long long)bit * ((LWE_Q + 1) / 2);   // 0 → 0,  1 → 1665
 }
-
-// Decode: 从含噪声的值恢复消息（噪声为0时为恒等）
-inline long long decode_msg(long long c) {
-    return ((c % LWE_Q) + LWE_Q) % LWE_Q;
+// Decode: 含噪值 → 1 bit（最近邻判定）
+inline int decode_bit(long long val) {
+    val = ((val % LWE_Q) + LWE_Q) % LWE_Q;
+    return (val >= LWE_Q / 4 && val < 3 * LWE_Q / 4) ? 1 : 0;
+}
+// 整数 → bit 数组（LSB first）
+inline std::vector<int> value_to_bits(long long s, int nbits = LWE_MSG_BITS) {
+    std::vector<int> bits(nbits);
+    for (int i = 0; i < nbits; i++) bits[i] = (int)((s >> i) & 1);
+    return bits;
+}
+// bit 数组 → 整数
+inline long long bits_to_value(const std::vector<int>& bits) {
+    long long s = 0;
+    for (int i = 0; i < (int)bits.size(); i++) s |= ((long long)bits[i] << i);
+    return s;
 }
 
 // Comp / DeComp: 压缩/解压（原型中保持恒等，保证正确解密）
